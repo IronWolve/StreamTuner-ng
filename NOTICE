@@ -1,0 +1,11 @@
+StreamTuner-ng
+Copyright 2026 IronWolve
+
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+A from-scratch port & reimagining of StreamTuner2 (Public Domain) — the idea and
+plugin-channel concept are carried forward; no original StreamTuner2 code is used.
+
+Uses, at runtime, components under their own licenses:
+  - Qt 6 / PySide6  — LGPL v3
+  - libmpv          — LGPL v2.1+

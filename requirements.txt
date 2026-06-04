@@ -1,0 +1,10 @@
+# Runtime dependencies (all permissive or LGPL — see DECISIONS D3).
+PySide6>=6.6        # Qt for Python (LGPL) — the GUI
+python-mpv>=1.0     # libmpv binding (MIT binding; libmpv is LGPL) — internal audio
+requests>=2.28      # HTTP for the channel plugins
+mutagen>=1.46       # ID3 / Vorbis tags for Local + recorded files (D17)
+
+# Note: python-mpv needs the libmpv shared library present at runtime
+#   Linux:   apt install libmpv2   (or libmpv1)
+#   Windows: bundled in the release build (mpv-2.dll next to the exe)
+pypresence>=4.3      # Discord Rich Presence (MIT) — optional; feature degrades if absent
