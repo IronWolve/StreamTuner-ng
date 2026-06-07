@@ -14,11 +14,11 @@ HISTORY_MAX = 60
 
 class Bookmarks(Channel):
     id = "bookmarks"
-    title = "Favourites"
+    title = "Favorites"
     description = "Your starred stations and play history."
     priority = "core"          # always on
-    category_pins = ("Favourites", "History")
-    icon_emoji = "⭐"          # Favourites — a star in the sidebar
+    category_pins = ("Favorites", "History")
+    icon_emoji = "⭐"          # Favorites — a star in the sidebar
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -58,6 +58,18 @@ class Bookmarks(Channel):
             self._save()
         return added
 
+    def import_data(self, favourites=None, history=None) -> int:
+        """Restore a backup: merge favourites (no-clobber) + history (dedup, capped).
+        Returns how many NEW favourites were added."""
+        n = self.add_many(favourites or [])
+        if history:
+            have = {r.get("url") for r in self.history}
+            fresh = [dict(r) for r in history if r.get("url") and r.get("url") not in have]
+            if fresh:
+                self.history = (fresh + self.history)[:HISTORY_MAX]
+                self._save()
+        return n
+
     def remove(self, url: str) -> None:
         self.favourite = [r for r in self.favourite if r.get("url") != url]
         self._fav_urls.discard(url)
@@ -92,7 +104,7 @@ class Bookmarks(Channel):
 
     # ---- channel contract ----
     def update_categories(self) -> list[str]:
-        return ["Favourites", "History"]
+        return ["Favorites", "History"]
 
     def update_streams(self, category: str, search: str | None = None) -> list[dict]:
         rows = self.history if category == "History" else self.favourite

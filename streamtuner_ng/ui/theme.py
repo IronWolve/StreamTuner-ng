@@ -27,9 +27,37 @@ def _hex(c: tuple[int, int, int]) -> str:
     return "#%02x%02x%02x" % (c[0], c[1], c[2])
 
 
+def _mix(a: tuple, b: tuple, t: float) -> tuple:
+    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _luminance(c) -> float:
+    return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255
+
+
+def _contrast(c) -> str:
+    """'black' or 'white' — whichever reads on a given background color."""
+    return "black" if _luminance(c) > 0.55 else "white"
+
+
+def _mk(bg, text, accent, on, on_text, dark):
+    """Build a full palette from a terminal theme's key colors (bg/fg/green/blue), deriving the
+    panel/groove/scroll shades. Lets us add Alacritty-style palettes compactly. `accent` stays the
+    'on/active' (green-family) highlight so lit==on holds; `on`/`on_text` are selection/hover."""
+    W, K = (255, 255, 255), (0, 0, 0)
+    if dark:
+        panel, panel2 = _mix(bg, W, 0.06), _mix(bg, W, 0.13)
+        groove, scroll, scroll_hi = _mix(bg, K, 0.35), _mix(bg, W, 0.22), _mix(bg, W, 0.34)
+    else:
+        panel, panel2 = _mix(bg, W, 0.55), _mix(bg, K, 0.07)
+        groove, scroll, scroll_hi = _mix(bg, K, 0.18), _mix(bg, K, 0.14), _mix(bg, K, 0.26)
+    return dict(dark=dark, bg=bg, panel=panel, panel2=panel2, text=text, on=on, on_text=on_text,
+                accent=accent, groove=groove, scroll=scroll, scroll_hi=scroll_hi)
+
+
 # Each theme = a structural palette. `accent` is the "on/active" highlight (a green-family
-# colour per theme, so "lit = on" stays true everywhere); `on`/`on_text` are the selection +
-# hover colours; `dark` drives is_dark(). The original Wavmaster dark/light are unchanged.
+# color per theme, so "lit = on" stays true everywhere); `on`/`on_text` are the selection +
+# hover colors; `dark` drives is_dark(). The original Wavmaster dark/light are unchanged.
 THEMES: dict[str, dict] = {
     "dark":  dict(dark=True,  bg=(28, 30, 33),  panel=(37, 40, 44),  panel2=(44, 48, 53),
                   text=(224, 226, 229), on=(40, 95, 60),  on_text="white", accent=GREEN,
@@ -52,13 +80,35 @@ THEMES: dict[str, dict] = {
     "gruvbox-dark": dict(dark=True, bg=(40, 40, 40), panel=(60, 56, 54), panel2=(80, 73, 69),
                          text=(235, 219, 178), on=(69, 133, 136), on_text="white", accent=(184, 187, 38),
                          groove=(29, 32, 33), scroll=(80, 73, 69), scroll_hi=(102, 92, 84)),
+    # --- terminal palettes, from the Alacritty theme repo (accent = each theme's green) ---
+    "xterm":          _mk(bg=(0, 0, 0),       text=(255, 255, 255), accent=(0, 205, 0),    on=(92, 92, 255),   on_text="white", dark=True),
+    "ubuntu":         _mk(bg=(48, 10, 36),    text=(238, 238, 236), accent=(138, 226, 52), on=(52, 101, 164),  on_text="white", dark=True),
+    "tokyo-night":    _mk(bg=(26, 27, 38),    text=(169, 177, 214), accent=(158, 206, 106), on=(122, 162, 247), on_text="black", dark=True),
+    "monokai-pro":    _mk(bg=(45, 42, 46),    text=(255, 241, 243), accent=(173, 218, 120), on=(168, 169, 235), on_text="black", dark=True),
+    "gruvbox-light":  _mk(bg=(251, 241, 199), text=(60, 56, 54),    accent=(152, 151, 26), on=(69, 133, 136),  on_text="white", dark=False),
+    "dark-pastels":   _mk(bg=(44, 44, 44),    text=(220, 220, 204), accent=(114, 213, 163), on=(154, 184, 215), on_text="black", dark=True),
+    "cyberpunk-neon": _mk(bg=(0, 11, 30),     text=(10, 189, 198),  accent=(0, 255, 0),    on=(113, 28, 145),  on_text="white", dark=True),
+    # --- retro phosphor / CRT palettes, from clausqr/claude-themes (colors only; the CRT
+    #     scanline/glow/flicker EFFECTS don't port — just the palettes) ---
+    "amber":          _mk(bg=(10, 5, 0),      text=(255, 176, 0),   accent=(255, 176, 0),   on=(255, 176, 0),  on_text="black", dark=True),
+    "green-phosphor": _mk(bg=(0, 26, 0),      text=(51, 255, 51),   accent=(51, 255, 51),   on=(51, 255, 51),  on_text="black", dark=True),
+    "white-phosphor": _mk(bg=(10, 10, 10),    text=(230, 230, 230), accent=(230, 230, 230), on=(200, 200, 200), on_text="black", dark=True),
+    "cga":            _mk(bg=(0, 0, 0),       text=(255, 255, 255), accent=(85, 255, 255),  on=(85, 255, 255), on_text="black", dark=True),
+    "crt":            _mk(bg=(0, 26, 0),      text=(57, 255, 85),   accent=(57, 255, 85),   on=(57, 255, 85),  on_text="black", dark=True),
+    # Synthwave ships a generated wallpaper (sunset + neon grid) — see ui/wallpaper.py.
+    "synthwave":     {**_mk(bg=(13, 11, 30),  text=(248, 248, 255), accent=(5, 217, 232),   on=(255, 42, 109), on_text="white", dark=True),
+                      "wallpaper": "synthwave"},
 }
 
 # display label for the View → Theme menu (dict insertion order = menu order)
 THEME_LABELS: dict[str, str] = {
     "dark": "Dark", "light": "Light", "dracula": "Dracula", "nord": "Nord",
     "solarized-dark": "Solarized Dark", "solarized-light": "Solarized Light",
-    "gruvbox-dark": "Gruvbox Dark",
+    "gruvbox-dark": "Gruvbox Dark", "gruvbox-light": "Gruvbox Light",
+    "xterm": "xterm", "ubuntu": "Ubuntu", "tokyo-night": "Tokyo Night",
+    "monokai-pro": "Monokai Pro", "dark-pastels": "Dark Pastels", "cyberpunk-neon": "Cyberpunk Neon",
+    "amber": "Amber", "green-phosphor": "Green Phosphor", "white-phosphor": "White Phosphor",
+    "cga": "CGA", "crt": "CRT Green", "synthwave": "Synthwave",
 }
 
 
@@ -70,6 +120,12 @@ def is_dark(mode: str) -> bool:
     return _theme(mode).get("dark", True)
 
 
+def theme_wallpaper(mode: str) -> str:
+    """The theme's built-in wallpaper spec: 'synthwave' (a generated background), a filename, or
+    '' for none. Used as the default wallpaper when the user hasn't picked their own image."""
+    return str(_theme(mode).get("wallpaper", "") or "")
+
+
 def dialog_colors(mode: str) -> tuple[str, str]:
     """(card-background css, body-text hex) for the styled dialogs, per theme."""
     p = _theme(mode)
@@ -77,13 +133,13 @@ def dialog_colors(mode: str) -> tuple[str, str]:
 
 
 # ---- user themes: shareable JSON files in ~/.config/streamtuner-ng/themes/ ----
-# a theme JSON carries these nine [r,g,b] colours, plus on_text (str) and dark (bool).
+# a theme JSON carries these nine [r,g,b] colors, plus on_text (str) and dark (bool).
 _THEME_RGB_KEYS = ("bg", "panel", "panel2", "text", "on", "accent", "groove", "scroll", "scroll_hi")
 BUILTIN_THEMES = tuple(THEMES)        # the ones we ship — users can't overwrite these
 
 
 def validate_theme(d: dict) -> dict:
-    """Normalise a raw theme dict (from JSON) into our colour dict, or raise ValueError."""
+    """Normalize a raw theme dict (from JSON) into our color dict, or raise ValueError."""
     if not isinstance(d, dict):
         raise ValueError("theme must be a JSON object")
     out: dict = {}
@@ -95,6 +151,9 @@ def validate_theme(d: dict) -> dict:
         out[k] = tuple(v)
     out["on_text"] = str(d.get("on_text", "white"))
     out["dark"] = bool(d.get("dark", True))
+    wp = d.get("wallpaper")
+    if isinstance(wp, str) and wp.strip():
+        out["wallpaper"] = wp.strip()        # optional: 'synthwave' or an image filename in the themes folder
     return out
 
 
@@ -112,6 +171,8 @@ def theme_export_dict(mode: str) -> dict:
                "on_text": p["on_text"]}
     for k in _THEME_RGB_KEYS:
         d[k] = list(p[k])
+    if p.get("wallpaper"):
+        d["wallpaper"] = p["wallpaper"]
     return d
 
 
@@ -150,11 +211,22 @@ def load_user_themes(config) -> list[tuple[str, str]]:
     return errors
 
 
-def stylesheet(mode: str = "dark") -> str:
+def stylesheet(mode: str = "dark", translucent: bool = False) -> str:
+    """`translucent=True` makes the panel surfaces semi-transparent so a wallpaper painted behind
+    the central widget shows through. Text and the selection color stay opaque for readability."""
     p = _theme(mode)
-    bg, panel, panel2 = _rgb(p["bg"]), _rgb(p["panel"]), _rgb(p["panel2"])
+
+    def _surf(c, a):                          # surface color; alpha<1 only when a wallpaper is active
+        return f"rgba({c[0]},{c[1]},{c[2]},{a:.2f})" if a < 1.0 else _rgb(c)
+    A = 0.80 if translucent else 1.0
+    bg = _rgb(p["bg"])                         # window background stays opaque (the wallpaper is the central widget)
+    panel, panel2 = _surf(p["panel"], A), _surf(p["panel2"], A)
     text, on, on_text = _rgb(p["text"]), _rgb(p["on"]), p["on_text"]
-    green = _rgb(p["accent"])          # the theme's "on/active" accent (green-family)
+    # The lit/active color (checked buttons, volume slider/handle) = the theme's OWN highlight (`on`),
+    # so "lit" matches the theme — never a generic green. The Wavmaster dark/light keep their bright
+    # green accent (that's their identity / the green=on heritage).
+    _lit = p["accent"] if mode in ("dark", "light") else p["on"]
+    green, green_text = _rgb(_lit), _contrast(_lit)
     groove = _rgb(p["groove"])
     scroll, scroll_hi = _rgb(p["scroll"]), _rgb(p["scroll_hi"])
     return f"""
@@ -192,7 +264,7 @@ def stylesheet(mode: str = "dark") -> str:
         padding: 6px 12px; color: {text};
     }}
     QPushButton:hover, QToolButton:hover {{ background: {on}; color: {on_text}; border-color: {on}; }}
-    QPushButton:checked, QToolButton:checked {{ background: {green}; color: black; }}
+    QPushButton:checked, QToolButton:checked {{ background: {green}; color: {green_text}; }}
     QSlider::groove:horizontal {{ height: 6px; background: {groove}; border-radius: 3px; }}
     QSlider::sub-page:horizontal {{ height: 6px; background: {green}; border-radius: 3px; }}
     QSlider::handle:horizontal {{

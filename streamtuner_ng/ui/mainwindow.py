@@ -28,7 +28,7 @@ from .worker import run_async, run_io
 class MainWindow(QMainWindow):
     nowplaying = Signal(str)   # marshals mpv's metadata callback onto the UI thread
 
-    # Favourites + Local are INTERNAL features, not directory plugins: always pinned
+    # Favorites + Local are INTERNAL features, not directory plugins: always pinned
     # at the top of the sidebar, and kept out of the enable/disable toggle lists.
     INTERNAL_CHANNELS = ("bookmarks", "local")
     _CACHE_STALE_S = 6 * 3600           # disk cache older than this -> freshen in the background
@@ -50,7 +50,7 @@ class MainWindow(QMainWindow):
         self._favicons: dict[str, str] = {}   # channel id -> cached favicon path
         self._svc_icons: dict = {}            # channel id -> QIcon, generic fallback for icon-less rows
         self._station_icons: dict = {}        # station favicon URL -> QIcon (None = in-flight)
-        self._station_favicons = bool(self.config.get("station_favicons", True))  # off -> service logo for all
+        self._station_favicons = self.config.icon_mode() != "off"   # off -> service logo for all (full/small differ only on disk)
         self._playing_row: dict | None = None     # the row currently streaming (for the album-art box)
         self._show_art = bool(self.config.get("show_album_art", True))
         self._viz = self.config.get("visualization", "")
@@ -113,6 +113,8 @@ class MainWindow(QMainWindow):
             self._stream_label.setToolTip(why)        # hover the ⚠ for the full reason
         self.player.set_normalize(self._normalize)   # apply the saved loudness-normalization setting
         self._setup_shortcuts()
+        self._setup_media_keys()
+        self._apply_appearance(self.config.get("theme", "dark"))   # apply wallpaper (if any) over the base theme
 
     # ---- construction ----
     def _build_toolbar(self) -> None:
@@ -120,12 +122,12 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
         self.act_reload = QAction("Reload", self, triggered=self._reload)
-        self.act_fav = QAction("★ Favourite", self, checkable=True, triggered=self._toggle_favourite)
+        self.act_fav = QAction("★ Favorite", self, checkable=True, triggered=self._toggle_favourite)
         self.act_play = QAction("Play", self, triggered=self._play_selected)
         self.act_stop = QAction("Stop", self, triggered=self._stop)
         tb.addAction(self.act_reload)
         tb.addAction(self.act_fav)
-        tb.addSeparator()                       # | between Favourite and the transport
+        tb.addSeparator()                       # | between Favorite and the transport
         tb.addAction(self.act_play)
         tb.addAction(self.act_stop)
         tb.addSeparator()                       # | between transport and Search
@@ -195,7 +197,9 @@ class MainWindow(QMainWindow):
         split.setStretchFactor(2, 1)
         split.setSizes([180, 200, 660])
 
-        central = QWidget()
+        from .wallpaper import WallpaperWidget
+        central = WallpaperWidget()           # paints the optional wallpaper behind everything
+        self._wallpaper_widget = central
         lay = QVBoxLayout(central)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.addWidget(split, 1)
@@ -318,6 +322,9 @@ class MainWindow(QMainWindow):
         # (no station icon here — the now-playing artwork lives in the bottom-left art box)
         self.np_label = QLabel("Stopped")
         self.np_label.setMinimumWidth(200)
+        self.np_label.setContextMenuPolicy(Qt.CustomContextMenu)        # right-click the track for options
+        self.np_label.customContextMenuRequested.connect(self._nowplaying_menu)
+        self.np_label.setToolTip("Right-click for track options (copy, info, website)")
         self.player.set_volume(self.config.get("volume", self.player.volume))   # restore saved volume
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setFixedWidth(120)
@@ -339,7 +346,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self.np_label, 1)
         h.addWidget(self.vu)
         h.addWidget(self.spectro)
-        h.addWidget(self._vsep())               # | between the visualisation and the volume
+        h.addWidget(self._vsep())               # | between the visualization and the volume
         h.addWidget(QLabel("Vol"))
         h.addWidget(self.vol)
         h.addWidget(self.btn_norm)
@@ -390,6 +397,8 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         self._theme_menu = m_view.addMenu("Theme")
         self._rebuild_theme_menu()
+        self._wallpaper_menu = m_view.addMenu("Wallpaper")
+        self._rebuild_wallpaper_menu()
 
         self.m_channels = mb.addMenu("&Channels")
         self._rebuild_channels_menu()
@@ -406,7 +415,6 @@ class MainWindow(QMainWindow):
         m_tools = mb.addMenu("&Tools")
         m_tools.addAction(QAction("Options…", self, shortcut="Ctrl+,", triggered=self._open_options))
         m_tools.addAction(QAction("Open Plugins Folder…", self, triggered=self._open_plugins_folder))
-        m_tools.addAction(QAction("Cache…", self, triggered=self._open_cache_manager))
 
         m_help = mb.addMenu("&Help")
         m_help.addAction(QAction("About", self, triggered=self._about))
@@ -416,7 +424,7 @@ class MainWindow(QMainWindow):
         self.channels.blockSignals(True)
         self.channels.clear()
         chans = list(self.host.shown_channels())
-        # Favourites + Local are internal — always pinned at the top from the full
+        # Favorites + Local are internal — always pinned at the top from the full
         # registry, regardless of their enabled/visible state (so they can never
         # vanish from a stale config). Then a divider, then the streaming services A–Z.
         top = [self.host.channels[cid] for cid in self.INTERNAL_CHANNELS
@@ -443,7 +451,7 @@ class MainWindow(QMainWindow):
                 break
 
     def _add_channel_separator(self) -> None:
-        """A thin divider line in the Services list (separates Favourites/Local from the services)."""
+        """A thin divider line in the Services list (separates Favorites/Local from the services)."""
         from PySide6.QtCore import QSize
         from PySide6.QtWidgets import QFrame
         sep = QListWidgetItem()
@@ -462,7 +470,7 @@ class MainWindow(QMainWindow):
     def _rebuild_channels_menu(self) -> None:
         self.m_channels.clear()
         chans = self.host.channels
-        internal = [chans[c] for c in self.INTERNAL_CHANNELS if c in chans]   # Favourites, Local first
+        internal = [chans[c] for c in self.INTERNAL_CHANNELS if c in chans]   # Favorites, Local first
         services = sorted((ch for cid, ch in chans.items()
                            if cid not in self.INTERNAL_CHANNELS and not ch.test_only),
                           key=lambda c: c.title.lower())                       # then services A–Z
@@ -534,18 +542,60 @@ class MainWindow(QMainWindow):
         home = getattr(ch, "homepage", "")
         if home:
             menu.addAction("Open Website", lambda: QDesktopServices.openUrl(QUrl(home)))
-        if cid == "bookmarks":                   # Favourites: export favourites OR history; import (merge)
-            menu.addAction("Export Favourites… (CSV)",
-                           lambda: self._export_rows(getattr(ch, "favourite", []), "favourites.csv"))
+        if cid == "bookmarks":                   # Favorites: export favourites OR history; import (merge)
+            menu.addAction("Export Favorites… (CSV)",
+                           lambda: self._export_rows(getattr(ch, "favourite", []), "favorites.csv"))
             menu.addAction("Export History… (CSV)",
                            lambda: self._export_rows(getattr(ch, "history", []), "history.csv"))
-            menu.addAction("Import to Favourites… (CSV)", self._import_favourites)
+            menu.addAction("Import to Favorites… (CSV)", self._import_favourites)
         elif cid == "local":                     # Local: export your own added streams
             menu.addAction("Export list… (CSV)",
                            lambda: self._export_rows(getattr(ch, "_rows", []), "local-stations.csv"))
+        # plugin-declared right-click options (bitrate, login, …) from the channel's options_spec
+        spec = getattr(ch, "options_spec", None) or []
+        if spec and self.config is not None:
+            menu.addSeparator()
+            for opt in spec:
+                self._add_channel_option(menu, opt)
         menu.addAction("Options…", self._open_options)
         menu.addAction("Refresh Icon", lambda: self._refresh_favicon(cid))
         menu.exec(self.channels.mapToGlobal(pos))
+
+    def _add_channel_option(self, menu, opt) -> None:
+        """Render one entry from a channel's options_spec into the right-click menu.
+        'choice' -> an exclusive (lit-check) submenu; 'secret' -> a masked Set/Change dialog."""
+        from PySide6.QtGui import QAction, QActionGroup
+        typ, key, label = opt.get("type"), opt.get("key", ""), opt.get("label", "")
+        if typ == "choice":
+            sub = menu.addMenu(label or "Quality")
+            grp = QActionGroup(sub)
+            grp.setExclusive(True)
+            cur = self.config.get(key, opt.get("default", ""))
+            for clabel, cval in opt.get("choices", []):
+                a = QAction(clabel, sub)
+                a.setCheckable(True)
+                a.setChecked(cval == cur)
+                a.triggered.connect(lambda _=False, k=key, v=cval, lb=clabel: self._set_channel_option(k, v, lb))
+                grp.addAction(a)
+                sub.addAction(a)
+        elif typ == "secret":
+            verb = "Change" if (self.config.get(key, "") or "") else "Set"
+            menu.addAction(f"{verb} {label}…",
+                           lambda k=key, lb=label, ph=opt.get("placeholder", ""): self._edit_channel_secret(k, lb, ph))
+
+    def _set_channel_option(self, key: str, value, label: str = "") -> None:
+        self.config.set(key, value)
+        self.config.save_settings()
+        self.statusBar().showMessage(f"Selected: {label}" if label else "Saved", 3000)
+
+    def _edit_channel_secret(self, key: str, label: str, placeholder: str = "") -> None:
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        cur = self.config.get(key, "") or ""
+        text, ok = QInputDialog.getText(self, label, f"{label}:", QLineEdit.Password, cur)
+        if ok:
+            self.config.set(key, text.strip())
+            self.config.save_settings()
+            self.statusBar().showMessage(f"{label} saved", 3000)
 
     def _export_rows(self, rows, suggested: str) -> None:
         """Save a station list to CSV (used by the right-click Export actions)."""
@@ -573,14 +623,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Export failed: {e}")
 
     def _import_favourites(self) -> None:
-        """Right-click Favourites → Import a CSV and MERGE it in (URLs already saved are
+        """Right-click Favorites → Import a CSV and MERGE it in (URLs already saved are
         skipped — no clobber). Sanity-checks the file: it must have a URL column, and each
         row needs a real URL (scheme://…); malformed rows are counted and ignored."""
         import csv
         from PySide6.QtWidgets import QFileDialog
 
         from ..plugins.base import make_row
-        path, _ = QFileDialog.getOpenFileName(self, "Import to Favourites", "",
+        path, _ = QFileDialog.getOpenFileName(self, "Import to Favorites", "",
                                               "CSV files (*.csv);;All files (*)")
         if not path:
             return
@@ -616,15 +666,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Import failed: {e}")
             return
         added = ch.add_many(parsed)
-        self._cache.pop(("bookmarks", "Favourites"), None)    # favourites changed -> drop stale cache
-        if self.current_channel == "bookmarks" and self.current_category == "Favourites":
+        self._cache.pop(("bookmarks", "Favorites"), None)    # favourites changed -> drop stale cache
+        if self.current_channel == "bookmarks" and self.current_category == "Favorites":
             self._on_category(self.categories.currentItem(), None)
         parts = [f"imported {added}"]
         if skipped:
             parts.append(f"skipped {skipped} already saved")
         if bad:
             parts.append(f"ignored {bad} with no/invalid URL")
-        self.statusBar().showMessage("Favourites: " + ", ".join(parts) + ".")
+        self.statusBar().showMessage("Favorites: " + ", ".join(parts) + ".")
 
     def _refresh_favicon(self, cid: str) -> None:
         for p in self.config.icon_dir.glob(f"chan_{cid}.*"):
@@ -872,7 +922,7 @@ class MainWindow(QMainWindow):
         so a big ALL doesn't pointlessly reset/scroll at the very end."""
         rows = self.model.rows()
         self._cache[(cid, cat)] = rows
-        if cid not in self.INTERNAL_CHANNELS:        # don't persist live/local lists (Favourites, Local)
+        if cid not in self.INTERNAL_CHANNELS:        # don't persist live/local lists (Favorites, Local)
             run_io(lambda r=list(rows): self.config.cache_save(cid, cat, r), lambda *_: None)  # async
         if self._is_all(cid, cat):
             union = self._union(cid)
@@ -951,7 +1001,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Play", lambda: (self.table.setCurrentIndex(idx), self._play_selected()))
         bm = self.host.channels.get("bookmarks")
         fav = bool(bm and bm.is_favourite(row.get("url", "")))
-        menu.addAction("Remove favourite" if fav else "★ Favourite",
+        menu.addAction("Remove favorite" if fav else "★ Favorite",
                        lambda: (self.table.setCurrentIndex(idx), self._toggle_favourite()))
         menu.addSeparator()
         menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(row.get("url", "")))
@@ -965,6 +1015,26 @@ class MainWindow(QMainWindow):
     def _station_info(self, row: dict) -> None:
         from .dialogs import station_info
         station_info(self, self.config.get("theme", "dark"), row)
+
+    def _nowplaying_menu(self, pos) -> None:
+        """Right-click the now-playing text on the player bar: copy the track / stream URL, station
+        info, open the broadcaster's site — all acting on the row that's actually streaming."""
+        row = self._playing_row
+        if not row:
+            return                                   # nothing playing -> no menu
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QApplication, QMenu
+        menu = QMenu(self)
+        track = clean_icy_title(self._np_full or "")
+        if track:
+            menu.addAction("Copy playing track", lambda: QApplication.clipboard().setText(track))
+        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(row.get("url", "")))
+        menu.addSeparator()
+        menu.addAction("Info…", lambda: self._station_info(row))
+        if row.get("homepage"):
+            menu.addAction("Open Website", lambda: QDesktopServices.openUrl(QUrl(row["homepage"])))
+        menu.exec(self.np_label.mapToGlobal(pos))
 
     def _recache_station_icon(self, row: dict) -> None:
         """Force-refresh this station's art-box icon: clear its cached files and re-fetch the
@@ -1089,15 +1159,15 @@ class MainWindow(QMainWindow):
         row.setdefault("_source", self.current_channel)   # remember origin (for resolving on play)
         now = bm.toggle(row)
         self.act_fav.setChecked(now)
-        self._cache.pop(("bookmarks", "Favourites"), None)   # the favourites list changed -> stale cache
-        if self.current_channel == "bookmarks" and self.current_category == "Favourites" and not now:
+        self._cache.pop(("bookmarks", "Favorites"), None)   # the favourites list changed -> stale cache
+        if self.current_channel == "bookmarks" and self.current_category == "Favorites" and not now:
             url = row.get("url", "")                          # viewing the list we just edited ->
             self.model.set_rows([r for r in self.model.rows() if r.get("url") != url])  # drop the row now
             self._apply_column_visibility()
-            self.statusBar().showMessage("Removed from Favourites: " + row["title"])
+            self.statusBar().showMessage("Removed from Favorites: " + row["title"])
         else:
             self.model.refresh_icons()                       # elsewhere: just flip the ★ marker in place
-            self.statusBar().showMessage(("Favourited " if now else "Unfavourited ") + row["title"])
+            self.statusBar().showMessage(("Favorited " if now else "Unfavorited ") + row["title"])
         if now and not row.get("favicon"):   # icon-less station -> derive its real favicon (background)
             from ..favicons import derive_station_favicon_url
             url = row.get("url", "")
@@ -1245,12 +1315,90 @@ class MainWindow(QMainWindow):
     def _set_theme(self, mode: str) -> None:
         self.config.set("theme", mode)
         self.config.save_settings()
-        from PySide6.QtWidgets import QApplication
-        QApplication.instance().setPalette(theme.palette(mode))   # keep OS dark-mode from bleeding in
-        QApplication.instance().setStyleSheet(theme.stylesheet(mode))
+        self._apply_appearance(mode)
         for m, a in self._theme_actions.items():
             a.setChecked(m == mode)
         self.statusBar().showMessage(f"{theme.THEME_LABELS.get(mode, mode)} theme")
+
+    def _rebuild_wallpaper_menu(self) -> None:
+        """(Re)build the View → Wallpaper submenu: Off, the built-in wallpapers, and Load image…
+        The checkmark reflects the current setting (mirrors Options → Themes → Wallpaper)."""
+        from .wallpaper import BUILTIN_WALLPAPERS
+        self._wallpaper_menu.clear()
+        on = bool(self.config.get("wallpaper_enabled", True))
+        cur = self.config.get("wallpaper_image", "") or ""
+        known = {spec for spec, _ in BUILTIN_WALLPAPERS}
+
+        off = QAction("Off", self, checkable=True)
+        off.setChecked(not on)
+        off.triggered.connect(lambda _=False: self._set_wallpaper_choice(None))
+        self._wallpaper_menu.addAction(off)
+        self._wallpaper_menu.addSeparator()
+        for spec, label in BUILTIN_WALLPAPERS:
+            a = QAction(label, self, checkable=True)
+            a.setChecked(on and cur == spec)
+            a.triggered.connect(lambda _=False, s=spec: self._set_wallpaper_choice(s))
+            self._wallpaper_menu.addAction(a)
+        self._wallpaper_menu.addSeparator()
+        load = QAction("Load image…", self, checkable=True)
+        load.setChecked(on and cur != "" and cur not in known)   # an absolute custom path is active
+        load.triggered.connect(lambda _=False: self._set_wallpaper_choice("__load__"))
+        self._wallpaper_menu.addAction(load)
+
+    def _set_wallpaper_choice(self, choice) -> None:
+        """View → Wallpaper pick: None = off; '__load__' = file dialog; else a spec ('' = theme
+        default, 'synthwave'/'vaporwave-1'/…, or an absolute image path)."""
+        from .wallpaper import BUILTIN_WALLPAPERS
+        if choice is None:
+            self.config.set("wallpaper_enabled", False)
+            msg = "Wallpaper off"
+        else:
+            if choice == "__load__":
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getOpenFileName(self, "Load wallpaper image", "",
+                                                      "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)")
+                if not path:
+                    self._rebuild_wallpaper_menu()       # cancelled -> restore the checkmarks
+                    return
+                choice = path
+            self.config.set("wallpaper_enabled", True)
+            self.config.set("wallpaper_image", choice)
+            msg = f"Wallpaper: {dict(BUILTIN_WALLPAPERS).get(choice, choice)}"
+        self.config.save_settings()
+        self._apply_appearance(self.config.get("theme", "dark"))
+        self._rebuild_wallpaper_menu()
+        self.statusBar().showMessage(msg)
+
+    def _on_wallpaper_changed(self) -> None:
+        """The Options dialog changed the wallpaper -> re-apply and resync the View menu checkmarks."""
+        self._apply_appearance(self.config.get("theme", "dark"))
+        self._rebuild_wallpaper_menu()
+
+    def _active_wallpaper_spec(self, mode: str) -> str:
+        """Which wallpaper to show: the user's chosen image if any, else the theme's built-in one
+        (only Synthwave ships one) — or '' when wallpaper is switched off."""
+        if not self.config.get("wallpaper_enabled", True):
+            return ""
+        custom = (self.config.get("wallpaper_image", "") or "").strip()
+        return custom or theme.theme_wallpaper(mode)
+
+    def _apply_appearance(self, mode: str) -> None:
+        """Apply theme + wallpaper together: palette, a translucency-aware stylesheet, and the
+        wallpaper pixmap behind the central widget. Used at startup and on every theme/wallpaper change."""
+        from PySide6.QtWidgets import QApplication
+        spec = self._active_wallpaper_spec(mode)
+        QApplication.instance().setPalette(theme.palette(mode))           # keep OS dark-mode from bleeding in
+        QApplication.instance().setStyleSheet(theme.stylesheet(mode, translucent=bool(spec)))
+        self._apply_wallpaper(spec)
+
+    def _apply_wallpaper(self, spec: str) -> None:
+        wd = getattr(self, "_wallpaper_widget", None)
+        if wd is None:
+            return
+        from .wallpaper import load_wallpaper
+        base = theme.user_theme_dir(self.config) if (spec and spec != "synthwave") else None
+        pix = load_wallpaper(spec, base) if spec else None
+        wd.set_wallpaper(pix, int(self.config.get("wallpaper_dim", 35)))
 
     def _reload_category(self, item) -> None:
         """Double-click a category → drop just that category's cache and re-fetch it fresh."""
@@ -1318,6 +1466,12 @@ class MainWindow(QMainWindow):
         if cid and cat and not self._is_all(cid, cat):   # skip the heavy full-directory sweep
             self._bg_refresh(cid, cat)
 
+    def _nudge_volume(self, delta: int) -> None:
+        """Bump the app's OWN (mpv) volume — bound to the Volume keys + Ctrl+Up/Down, so when the
+        app is focused they control playback volume instead of the system mixer."""
+        self.vol.setValue(max(0, min(100, self.vol.value() + delta)))   # moves slider -> set_volume + save
+        self.statusBar().showMessage(f"Volume {self.vol.value()}%", 1500)
+
     def _setup_shortcuts(self) -> None:
         from PySide6.QtGui import QKeySequence, QShortcut
 
@@ -1329,6 +1483,10 @@ class MainWindow(QMainWindow):
         sc(Qt.Key_MediaTogglePlayPause, self._toggle_play)
         sc("Ctrl+.", self._stop)
         sc(Qt.Key_MediaStop, self._stop)
+        sc(Qt.Key_VolumeUp, lambda: self._nudge_volume(5))     # app volume when focused (not system)
+        sc(Qt.Key_VolumeDown, lambda: self._nudge_volume(-5))
+        sc("Ctrl+Up", lambda: self._nudge_volume(5))           # reliable in-app vol (Volume keys can be OS-grabbed)
+        sc("Ctrl+Down", lambda: self._nudge_volume(-5))
         sc("F5", self._reload)
         sc("Ctrl+R", self._reload)
         sc("Ctrl+F", self._focus_search)
@@ -1338,104 +1496,39 @@ class MainWindow(QMainWindow):
         esc = QShortcut(QKeySequence(Qt.Key_Escape), self.search)   # Esc clears the focused search box
         esc.activated.connect(self.search.clear)
 
+    def _setup_media_keys(self) -> None:
+        """OS-global media keys (Play/Pause, Stop, Next, Prev) so they work even when the window is
+        minimized or unfocused. Windows-only today (RegisterHotKey via ctypes); a graceful no-op
+        elsewhere, where the focused-window shortcuts above still handle the keys."""
+        from .mediakeys import MediaKeys
+        self._media_keys = MediaKeys({
+            "play_pause": self._toggle_play,
+            "stop": self._stop,
+            "next": lambda: self._play_relative(1),
+            "prev": lambda: self._play_relative(-1),
+        })
+        try:
+            self._media_keys.install(int(self.winId()))   # winId() realizes the native window -> HWND
+        except Exception:  # noqa: BLE001 — never let a hotkey quirk block startup
+            pass
+
+    def _play_relative(self, delta: int) -> None:
+        """Media Next/Prev: step the selection by one visible row and play it (live-radio
+        'next/previous station')."""
+        n = self.proxy.rowCount()
+        if not n:
+            return
+        cur = self.table.currentIndex()
+        r = max(0, min(n - 1, (cur.row() if cur.isValid() else -1) + delta))
+        idx = self.proxy.index(r, 0)
+        if idx.isValid():
+            self.table.setCurrentIndex(idx)
+            self.table.scrollTo(idx)
+            self._play_selected()
+
     def _focus_search(self) -> None:
         self.search.setFocus()
         self.search.selectAll()
-
-    def _open_cache_manager(self) -> None:
-        """Tools → Cache… — show what's cached (station lists per service + favicons on disk)
-        and clear each independently, with a confirm."""
-        from collections import defaultdict
-        from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton
-        from .dialogs import StyledDialog
-        dlg = StyledDialog(self, "Cache", self.config.get("theme", "dark"))
-        dlg.card.setMinimumWidth(440)
-        col = dlg.text_col
-
-        def section(text):
-            lbl = QLabel(text)
-            lbl.setStyleSheet(f"color:{col};")
-            f = lbl.font(); f.setBold(True); f.setPointSizeF(f.pointSizeF() + 1); lbl.setFont(f)
-            return lbl
-
-        def right(btn):
-            h = QHBoxLayout(); h.addStretch(1); h.addWidget(btn); return h
-
-        # --- station cache (in memory), per service ---
-        per = defaultdict(lambda: [0, 0])     # cid -> [lists, stations]
-        for (cid, _cat), rows in self._cache.items():
-            per[cid][0] += 1
-            per[cid][1] += len(rows)
-        dlg.body.addWidget(section("Station cache  ·  in memory, this session"))
-        grid = QGridLayout(); grid.setHorizontalSpacing(18); grid.setColumnStretch(1, 1)
-        tot_st = 0
-        for r, cid in enumerate(sorted(per, key=lambda c: self._channel_title(c).lower())):
-            lists, st = per[cid]; tot_st += st
-            k = QLabel(self._channel_title(cid)); k.setStyleSheet(f"color:{col};")
-            v = QLabel(f"{lists} list{'' if lists == 1 else 's'} · {st:,} stations")
-            v.setStyleSheet(f"color:{col};")
-            grid.addWidget(k, r, 0); grid.addWidget(v, r, 1)
-        if not per:
-            e = QLabel("(nothing cached yet)"); e.setStyleSheet(f"color:{col};")
-            grid.addWidget(e, 0, 0, 1, 2)
-        dlg.body.addLayout(grid)
-        b_st = QPushButton(f"Clear stations  ({tot_st:,})")
-        b_st.setEnabled(tot_st > 0)
-        b_st.clicked.connect(lambda: self._confirm_clear_stations(dlg))
-        dlg.body.addLayout(right(b_st))
-
-        # --- favicons (on disk) ---
-        chan = list(self.config.icon_dir.glob("chan_*"))
-        stn = list(self.config.icon_dir.glob("st_*"))
-        size_mb = sum(p.stat().st_size for p in chan + stn) / (1024 * 1024)
-        dlg.body.addWidget(section("Favicons  ·  on disk, permanent"))
-        f = QLabel(f"Service icons: {len(chan)}    ·    Station icons: {len(stn)}    (~{size_mb:.1f} MB)")
-        f.setStyleSheet(f"color:{col};")
-        dlg.body.addWidget(f)
-        b_fav = QPushButton(f"Clear favicons  ({len(chan) + len(stn)})")
-        b_fav.setEnabled(bool(chan or stn))
-        b_fav.clicked.connect(lambda: self._confirm_clear_favicons(dlg))
-        dlg.body.addLayout(right(b_fav))
-
-        close = QPushButton("Close"); close.clicked.connect(dlg.accept)
-        dlg.add_buttons(close)
-        dlg.exec()
-
-    def _channel_title(self, cid: str) -> str:
-        ch = self.host.channels.get(cid)
-        return ch.title if ch else cid
-
-    def _confirm_clear_stations(self, parent_dlg) -> None:
-        from .dialogs import confirm
-        n_lists = len(self._cache)
-        n_st = sum(len(v) for v in self._cache.values())
-        if confirm(self, self.config.get("theme", "dark"), "Clear station cache",
-                   f"Clear all cached station lists?\n{n_lists} list(s) · {n_st:,} stations will be "
-                   "dropped — your favicons are kept."):
-            self._cache.clear()
-            self._cat_cache.clear()
-            self._update_cache_label()
-            self.statusBar().showMessage("Station cache cleared (favicons kept)")
-            parent_dlg.accept()
-
-    def _confirm_clear_favicons(self, parent_dlg) -> None:
-        from .dialogs import confirm
-        chan = list(self.config.icon_dir.glob("chan_*"))
-        stn = list(self.config.icon_dir.glob("st_*"))
-        if confirm(self, self.config.get("theme", "dark"), "Clear favicons",
-                   f"Delete all {len(chan) + len(stn)} cached favicons? They'll re-download as you browse."):
-            for p in chan + stn:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-            self._station_icons.clear()
-            self._svc_icons.clear()
-            self._favicons.clear()
-            self.model.refresh_icons()
-            self._load_channel_favicons()      # re-fetch the service tab icons
-            self.statusBar().showMessage("Favicon cache cleared")
-            parent_dlg.accept()
 
     def _update_stream_status(self) -> None:
         try:
@@ -1510,7 +1603,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _tick_viz(self) -> None:
-        """Drive the active visualisation from the live audio levels (~30 fps). Never crash."""
+        """Drive the active visualization from the live audio levels (~30 fps). Never crash."""
         if self._viz == "off":
             return
         try:
@@ -1657,6 +1750,11 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
         self.statusBar().showMessage(f"Drop a .py plugin in: {d}")
 
+    def _on_cache_cleared(self) -> None:
+        """Disk cache cleared from Options → Cache & Data: drop the in-memory cache + reload."""
+        self._cache.clear()
+        self._reload()
+
     def _open_options(self) -> None:
         from .options import OptionsDialog
         dlg = OptionsDialog(self.host, self.config, self, self.config.get("theme", "dark"))
@@ -1664,10 +1762,13 @@ class MainWindow(QMainWindow):
         dlg.settings_changed.connect(self._apply_general_settings)
         dlg.themes_reloaded.connect(self._rebuild_theme_menu)   # a theme was imported
         dlg.theme_changed.connect(self._set_theme)              # a theme was picked/applied
+        dlg.cache_cleared.connect(self._on_cache_cleared)       # disk cache cleared -> drop in-memory + reload
+        dlg.data_imported.connect(self._on_cache_cleared)       # backup imported -> refresh favourites/local
+        dlg.wallpaper_changed.connect(self._on_wallpaper_changed)
         dlg.exec()
 
     def _apply_general_settings(self) -> None:
-        self._station_favicons = bool(self.config.get("station_favicons", True))
+        self._station_favicons = self.config.icon_mode() != "off"
         self._notifications = bool(self.config.get("notifications", True))
         self.model.refresh_icons()           # flip station icons <-> service logo immediately
         self._apply_tray()                   # tray icon / visibility may have changed
@@ -1798,6 +1899,9 @@ class MainWindow(QMainWindow):
             e.ignore()                   # close-to-tray: hide + keep playing; Quit from the tray menu
             self.hide()
             return
+        mk = getattr(self, "_media_keys", None)
+        if mk is not None:
+            mk.uninstall()               # release the global media-key grab
         self._save_layout()              # remember window size + column layout
         for t in (self._vu_timer, self._stats_timer, self._refresh_timer,
                   self._discord_timer, self._search_timer, self._icon_refresh):

@@ -50,10 +50,28 @@ def get_text(url: str, params: dict | None = None, headers: dict | None = None,
     return r.text
 
 
-def get_bytes(url: str, timeout: float = DEFAULT_TIMEOUT) -> bytes:
-    r = session.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.content
+def get_bytes(url: str, timeout: float = DEFAULT_TIMEOUT, max_bytes: int | None = None) -> bytes:
+    """Fetch raw bytes. `max_bytes` caps the download (streamed): a resource that declares or
+    streams past the cap raises ValueError, so a runaway 'favicon' can't fill the disk or RAM."""
+    if not max_bytes:
+        r = session.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.content
+    r = session.get(url, timeout=timeout, stream=True)
+    try:
+        r.raise_for_status()
+        declared = r.headers.get("Content-Length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise ValueError(f"resource too large: {declared} bytes > {max_bytes}")
+        chunks, total = [], 0
+        for chunk in r.iter_content(65536):
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"resource exceeded {max_bytes} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        r.close()
 
 
 def post_json(url: str, data: dict | None = None, headers: dict | None = None,

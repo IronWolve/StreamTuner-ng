@@ -1,6 +1,23 @@
-# ─── StreamTuner-ng .gitignore ───────────────────────────────────────────────
-# Keeps build junk, fetched binaries, the upstream reference, and our internal
-# design docs out of the public repo (DEV_NOTES lesson / DECISIONS D21).
+# StreamTuner-ng .gitignore
+# Public repo allowlist: source, legal/notice, public plugin/theme docs,
+# README/release notes, run launchers, requirements, and screenshots.
+# Internal planning docs, reference source, build output, and fetched binaries stay local.
+
+# Default-deny root clutter; unignore the public surface below.
+/*
+!/.gitignore
+!/streamtuner_ng/
+!/run.py
+!/run.sh
+!/run_windows.bat
+!/requirements.txt
+!/README.md
+!/RELEASE.md
+!/THEME-HOWTO.md
+!/PLUGINS.md
+!/LICENSE
+!/NOTICE
+!/screenshots/
 
 # Python bytecode / packaging
 __pycache__/
@@ -19,12 +36,13 @@ build/
 dist/
 *.spec
 
-# Build / dev / run helper scripts + install notes are NOT published — the repo ships
-# just the app code (streamtuner_ng/ + run.py) and requirements.txt. Binaries are built
+# Build / dev helper scripts + install notes are NOT published. Binaries are built
 # locally and attached to GitHub Releases.
 build.py
 *.sh
+!run.sh
 *.bat
+!run_windows.bat
 BUILD_WINDOWS.txt
 
 # Platform binaries we fetch per-OS, never commit (libmpv is ~100 MB)
@@ -40,14 +58,12 @@ releases/
 # Reference-only upstream source — never shipped or committed
 reference/
 
-# Internal working notes / design docs are NOT published — only the README and
-# the user-facing guides ship. Every other *.md stays local; add "!NAME.md" to
-# publish another one (e.g. a plugin-authoring guide).
+# Internal working notes / design docs are NOT published.
 *.md
 !README.md
+!RELEASE.md
 !THEME-HOWTO.md
 !PLUGINS.md
-!HISTORY.md
 
 # OS / editor cruft
 .DS_Store

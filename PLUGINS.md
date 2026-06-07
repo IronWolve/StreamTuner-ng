@@ -55,6 +55,18 @@ is optional and defaults sensibly:
   that must be turned into a real stream URL at play time (e.g. a tune-in link).
 - **`group = "MyNetwork"`** — render several related channels under one sidebar header.
 - **`priority`** — `"core"/"standard"/"default"` = on by default; anything else = off.
+- **`options_spec = [...]`** — add your own **right-click menu options** with no UI code. The app
+  renders them and saves the value to config under `key`; your plugin just reads it back with
+  `self.config.get(key, default)`. Two kinds: a **`choice`** submenu (radio, lit-checked — e.g. a
+  bitrate picker) and a **`secret`** masked dialog (e.g. a login key/token).
+  ```python
+  options_spec = [
+      {"type": "choice", "key": "myradio_quality", "label": "Bitrate", "default": "hi",
+       "choices": [("320 kbps", "hi"), ("128 kbps", "lo")]},
+      {"type": "secret", "key": "myradio_token", "label": "API Token", "placeholder": "paste it"},
+  ]
+  # then in update_streams / resolve_url:  q = self.config.get("myradio_quality", "hi")
+  ```
 
 ## You can't break the app
 

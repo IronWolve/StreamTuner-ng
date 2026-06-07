@@ -28,7 +28,7 @@ def run_app() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     # Force Fusion on every platform so our stylesheet renders identically. Linux already defaults
     # to Fusion; Windows defaults to its native style, which only partially honours the QSS (e.g. it
-    # won't fill the row-selection colour across the table) — Fusion fixes that.
+    # won't fill the row-selection color across the table) — Fusion fixes that.
     app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)

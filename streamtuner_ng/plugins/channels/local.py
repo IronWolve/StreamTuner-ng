@@ -32,6 +32,21 @@ class Local(Channel):
         self._save()
         return row
 
+    def add_many(self, rows) -> int:
+        """Merge rows in, skipping URLs already present (no clobber). Returns how many added."""
+        have = {r.get("url") for r in self._rows}
+        added = 0
+        for r in rows or []:
+            u = (r.get("url") or "").strip()
+            if not u or u in have:
+                continue
+            self._rows.append(dict(r))
+            have.add(u)
+            added += 1
+        if added:
+            self._save()
+        return added
+
     def remove(self, url: str) -> None:
         self._rows = [r for r in self._rows if r.get("url") != url]
         self._save()

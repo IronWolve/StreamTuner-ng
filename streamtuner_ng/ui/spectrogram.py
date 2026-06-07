@@ -1,9 +1,9 @@
-"""A scrolling spectrum visualiser for the player bar — an alternative to the VU meter.
+"""A scrolling spectrum visualizer for the player bar — an alternative to the VU meter.
 
 Driven by the live audio levels (the same astats RMS/peak the VU reads): louder → brighter,
 transients flash the highs, silence scrolls to black. The embedded mpv engine doesn't expose
 raw FFT bins, so the per-frequency detail is *modelled* from loudness + crest factor rather
-than a true transform — a music visualiser, honest about what it is.
+than a true transform — a music visualizer, honest about what it is.
 
 Resizable: drag the LEFT edge to stretch it wider (as far as there's room); it snaps back to
 its normal width past the minimum, or whenever the window is resized.

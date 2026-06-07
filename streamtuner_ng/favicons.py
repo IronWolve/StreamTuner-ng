@@ -25,6 +25,65 @@ def _ext(data: bytes) -> str:
     return "ico"
 
 
+_ICON_PX = 64               # cache station/channel icons no larger than this (on-screen box ~16-32px)
+_SHRINK_FLOOR = 20_000      # bytes; below this, store as-is (already small -> skip decode, no CPU)
+_MAX_ICON_BYTES = 16 << 20  # hard download cap (runaway guard): refuse a "favicon" bigger than this
+
+
+def _shrink(data: bytes) -> tuple[bytes, str]:
+    """Return (bytes, ext) for caching in 'small' mode. A multi-MB hero image is decoded once
+    (in the caller's IO worker thread, never the UI thread) and re-encoded as a <=_ICON_PX PNG;
+    already-small or undecodable data is returned untouched, so a tiny .ico never gets bloated.
+    JPEGs scale during decode where supported, so the big image never fully expands in memory."""
+    if len(data) <= _SHRINK_FLOOR:
+        return data, _ext(data)
+    try:
+        from PySide6.QtCore import QBuffer, QIODevice, Qt
+        from PySide6.QtGui import QImage, QImageReader
+        rbuf = QBuffer()
+        rbuf.setData(data)                           # copies in -> no dangling-buffer lifetime trap
+        rbuf.open(QIODevice.ReadOnly)
+        reader = QImageReader(rbuf)
+        reader.setAutoTransform(True)
+        sz = reader.size()
+        if sz.isValid() and sz.width() <= _ICON_PX and sz.height() <= _ICON_PX:
+            return data, _ext(data)                  # small dimensions already -> keep original
+        if sz.isValid():
+            sz.scale(_ICON_PX, _ICON_PX, Qt.KeepAspectRatio)
+            reader.setScaledSize(sz)                 # scaled decode (cheap for JPEG)
+        img = reader.read()
+        if img.isNull():
+            img = QImage.fromData(data)              # fallback: plain full decode
+        if img.isNull():
+            return data, _ext(data)
+        if img.width() > _ICON_PX or img.height() > _ICON_PX:
+            img = img.scaled(_ICON_PX, _ICON_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        wbuf = QBuffer()
+        wbuf.open(QIODevice.WriteOnly)
+        if img.save(wbuf, "PNG"):
+            b = bytes(wbuf.data())
+            if b:
+                return b, "png"
+    except Exception:  # noqa: BLE001 — any decode/encode failure -> just cache the original bytes
+        pass
+    return data, _ext(data)
+
+
+def _store_icon(config, stem: str, data: bytes) -> str | None:
+    """Write an icon as <stem>.<ext> in the icon dir, downscaling first when icon_mode is 'small'.
+    Returns the cached path, or None on write failure."""
+    if getattr(config, "icon_mode", None) and config.icon_mode() == "small":
+        data, ext = _shrink(data)
+    else:
+        ext = _ext(data)
+    path = config.icon_dir / f"{stem}.{ext}"
+    try:
+        path.write_bytes(data)
+        return str(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _fetch(homepage: str) -> bytes | None:
     """Try the homepage's <link rel=icon>, else fall back to /favicon.ico."""
     href = None
@@ -41,7 +100,7 @@ def _fetch(homepage: str) -> bytes | None:
         p = urlparse(homepage)
         href = f"{p.scheme}://{p.netloc}/favicon.ico"
     try:
-        data = http.get_bytes(href, timeout=_FAV_TIMEOUT)
+        data = http.get_bytes(href, timeout=_FAV_TIMEOUT, max_bytes=_MAX_ICON_BYTES)
         if data and len(data) > 70:        # skip empty / 1x1 stub responses
             return data
     except Exception:  # noqa: BLE001
@@ -59,12 +118,7 @@ def ensure_favicon(config, channel) -> str | None:
     data = _fetch(home)
     if not data:
         return None
-    path = config.icon_dir / f"chan_{channel.id}.{_ext(data)}"
-    try:
-        path.write_bytes(data)
-        return str(path)
-    except Exception:  # noqa: BLE001
-        return None
+    return _store_icon(config, f"chan_{channel.id}", data)
 
 
 _BROWSER_UA = {"User-Agent": http.BROWSER_UA}
@@ -153,7 +207,7 @@ def _best_icon_bytes(homepage: str) -> bytes | None:
             break
         tries += 1
         try:
-            data = http.get_bytes(u, timeout=_FAV_TIMEOUT)
+            data = http.get_bytes(u, timeout=_FAV_TIMEOUT, max_bytes=_MAX_ICON_BYTES)
         except Exception:  # noqa: BLE001
             continue
         if not data or len(data) <= 70:
@@ -220,11 +274,9 @@ def station_favicon(config, url: str) -> str | None:
     for existing in config.icon_dir.glob(f"st_{h}.*"):
         return None if existing.suffix == ".miss" else str(existing)
     try:
-        data = http.get_bytes(url, timeout=_FAV_TIMEOUT)
+        data = http.get_bytes(url, timeout=_FAV_TIMEOUT, max_bytes=_MAX_ICON_BYTES)
         if data and len(data) > 70:
-            path = config.icon_dir / f"st_{h}.{_ext(data)}"
-            path.write_bytes(data)
-            return str(path)
+            return _store_icon(config, f"st_{h}", data)
     except Exception:  # noqa: BLE001
         return None
     return None
@@ -253,12 +305,7 @@ def derived_station_favicon(config, row: dict) -> str | None:
     home = _derived_home(row)
     data = _best_icon_bytes(home) if home else None
     if data:
-        path = config.icon_dir / f"st_{h}.{_ext(data)}"
-        try:
-            path.write_bytes(data)
-            return str(path)
-        except Exception:  # noqa: BLE001
-            return None
+        return _store_icon(config, f"st_{h}", data)
     try:
         (config.icon_dir / f"st_{h}.miss").write_bytes(b"")   # remember the miss; don't re-derive
     except Exception:  # noqa: BLE001

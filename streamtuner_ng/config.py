@@ -121,6 +121,64 @@ class Config:
                 pass
         return n
 
+    # ---- data usage + export (for the Cache & Data options tab) ----
+    @staticmethod
+    def _dir_size(p: Path) -> int:
+        total = 0
+        try:
+            for f in p.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    def data_usage(self) -> dict:
+        """Disk bytes used per area, for the Cache & Data tab."""
+        cache = self._dir_size(self.cache_dir)
+        icons = self._dir_size(self.icon_dir)
+        total = self._dir_size(self.dir)
+        return {"cache": cache, "icons": icons, "other": max(0, total - cache - icons),
+                "total": total, "cache_files": sum(1 for _ in self.cache_dir.glob("*.json"))}
+
+    def clear_icons(self) -> int:
+        n = 0
+        for p in self.icon_dir.glob("*"):
+            if p.is_file() and p.name != ".nobackup":
+                try:
+                    p.unlink()
+                    n += 1
+                except OSError:
+                    pass
+        return n
+
+    ICON_MODES = ("off", "full", "small")
+
+    def icon_mode(self) -> str:
+        """How per-station icons are cached: 'off' (use each service's own logo for all of its
+        stations, no fetching), 'full' (cache the icon as the server sends it), or 'small'
+        (downscale to a thumbnail — keeps the art at a fraction of the disk). Migrates the old
+        station_favicons bool: missing/True -> 'small', explicit False -> 'off'."""
+        m = self.get("station_icon_mode")
+        if m in self.ICON_MODES:
+            return m
+        return "off" if self.get("station_favicons", True) is False else "small"
+
+    def export_bundle(self) -> dict:
+        """Everything worth backing up — settings (minus secrets), favourites/history, local
+        stations — as one JSON-able dict. Excludes the regenerable cache + icons."""
+        from . import __version__
+
+        def is_secret(k: str) -> bool:
+            return k.endswith("_listen_key") or k.endswith("_token") or "secret" in k.lower()
+
+        return {"app": "streamtuner-ng", "version": __version__, "exported": int(time.time()),
+                "settings": {k: v for k, v in self.settings.items() if not is_secret(k)},
+                "bookmarks": self.load("bookmarks"), "local": self.load("local")}
+
     # ---- typed option access (per-plugin options live here too) ----
     def get(self, key: str, default: Any = None) -> Any:
         return self.settings.get(key, default)

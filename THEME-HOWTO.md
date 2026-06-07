@@ -1,14 +1,14 @@
 # Making a StreamTuner-ng theme
 
-A theme is a tiny **JSON file** with ten colours. You can make your own, tweak a
+A theme is a tiny **JSON file** with ten colors. You can make your own, tweak a
 built-in one, and share it with anyone — they just drop your file in and pick it.
 
 ## The fastest way (export → edit → import)
 
 1. Open **Options → Themes**.
 2. Pick a theme close to what you want (e.g. *Dracula*) and click **Export selected…**.
-   You now have a `.json` file with every colour filled in.
-3. Open that file in any text editor and change the colours (see below).
+   You now have a `.json` file with every color filled in.
+3. Open that file in any text editor and change the colors (see below).
 4. Back in **Options → Themes**, click **Import theme…** and choose your file.
    It's validated, applied immediately, and saved — it'll be there next launch and
    in the **View → Theme** menu.
@@ -38,8 +38,8 @@ with `_` are templates and are **not** loaded — copy one to a normal name to u
 }
 ```
 
-Every colour is an `[R, G, B]` array of three numbers from **0 to 255**. Grab the
-RGB values from any colour picker (or paste a hex like `#282a36` into one to get
+Every color is an `[R, G, B]` array of three numbers from **0 to 255**. Grab the
+RGB values from any color picker (or paste a hex like `#282a36` into one to get
 `[40, 42, 54]`).
 
 ### What each field controls
@@ -51,13 +51,21 @@ RGB values from any colour picker (or paste a hex like `#282a36` into one to get
 | `bg`         | The window background (behind everything). |
 | `panel`      | Lists, the station table, text fields, dialog cards. |
 | `panel2`     | Toolbar, the now-playing bar, table headers, menu bar. |
-| `text`       | Main text colour. |
-| `on`         | **Selection / hover** background (selected row, hovered button, current tab). |
-| `on_text`    | Text drawn **on** the selection colour — usually `"white"` or `"black"`. |
-| `accent`     | The **"on / active"** colour — lit toggle buttons (Norm), the volume slider, checked items. Keep it bright and green-ish so "lit = on" reads clearly, or make it your own. |
+| `text`       | Main text color. |
+| `on`         | **Selection / hover** background (selected row, hovered button, current tab) — each theme's own highlight color. |
+| `on_text`    | Text drawn **on** the selection color — usually `"white"` or `"black"`. |
+| `accent`     | The **"on / active"** color — lit toggle buttons (Norm), the volume slider, checked items. Keep it bright and green-ish so "lit = on" reads clearly, or make it your own. |
 | `groove`     | The empty part of the volume slider track. |
 | `scroll`     | Scrollbar handle. |
 | `scroll_hi`  | Scrollbar handle when hovered. |
+
+### Optional: a wallpaper
+
+A theme may add an optional **`"wallpaper"`** field — either `"synthwave"` (a built-in generated
+sunset-grid background) or the **filename of an image you dropped in the themes folder** (e.g.
+`"wallpaper": "myart.jpg"`). When set, the panels go slightly translucent so the image shows behind
+the station list. You can also set a background image for *any* theme — without editing the theme —
+under **Options → Themes → Wallpaper**, where the **Dim** slider darkens it for readability.
 
 ## Tips
 

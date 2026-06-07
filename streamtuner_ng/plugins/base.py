@@ -67,6 +67,9 @@ class Channel:
     default_sort: str = ""        # if set, the table opens sorted DESC by this row field (e.g.
                                   # "listeners") — surfaces the active/popular stations first
     icon_emoji: str = ""          # sidebar icon fallback when there's no favicon
+    options_spec: list = []      # right-click options the UI renders + stores in config (the plugin
+                                 # just reads its config key back) — see PLUGINS.md. Supports a "choice"
+                                 # submenu (e.g. bitrate) and a "secret" login/key dialog. Empty = none.
     test_only: bool = False      # hidden helper plugins (e.g. selftest fakes)
 
     def __init__(self, config: Any = None):

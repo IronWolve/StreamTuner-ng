@@ -1,5 +1,5 @@
 """System tray (radiotray-ng-style, DECISIONS D18). Now-playing, Play/Pause/Stop,
-Favourites quick-play, show/hide, quit. The icon is a chosen emoji (a music note by
+Favorites quick-play, show/hide, quit. The icon is a chosen emoji (a music note by
 default — a logo doesn't read at tray size). Returns None when no tray host is available
 (e.g. GNOME without an AppIndicator extension) so the app stays a normal window.
 """
@@ -58,7 +58,7 @@ def build_tray(window, host, player):
     menu.addAction("Stop", window._stop)
     menu.addSeparator()
 
-    fav_menu = menu.addMenu("★ Favourites")
+    fav_menu = menu.addMenu("★ Favorites")
     bm = host.channels.get("bookmarks")
     if bm and bm.favourite:
         for row in bm.favourite[:25]:
