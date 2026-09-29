@@ -1,0 +1,131 @@
+"""Bookmarks — favourites + recently-played history.
+
+Persists to ~/.config/streamtuner-ng/bookmarks.json:
+    {"favourite": [row, ...], "history": [row, ...]}
+The star button calls add()/remove(); is_favourite() drives the lit-state.
+"""
+
+from __future__ import annotations
+
+from ..base import Channel
+from ...security import station_row, station_rows, valid_url
+
+HISTORY_MAX = 60
+
+
+class Bookmarks(Channel):
+    id = "bookmarks"
+    title = "Favorites"
+    description = "Your starred stations and play history."
+    priority = "core"          # always on
+    category_pins = ("Favorites", "History")
+    icon_emoji = "⭐"          # Favorites — a star in the sidebar
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        data = (config.load("bookmarks") if config else None) or {}
+        data = data if isinstance(data, dict) else {}
+        self.favourite: list[dict] = station_rows(data.get("favourite"))
+        self.history: list[dict] = station_rows(data.get("history"))[:HISTORY_MAX]
+        self._fav_urls = {r.get("url") for r in self.favourite}
+
+    def _save(self) -> None:
+        if self.config is not None:
+            self.config.save("bookmarks", {"favourite": self.favourite, "history": self.history})
+
+    # ---- favourites ----
+    def is_favourite(self, url: str) -> bool:
+        return url in self._fav_urls
+
+    def add(self, row: dict) -> None:
+        row = station_row(row)
+        if row is None:
+            return
+        url = row.get("url")
+        if not url or url in self._fav_urls:
+            return
+        self.favourite.append(dict(row))
+        self._fav_urls.add(url)
+        self._save()
+
+    def add_many(self, rows: list[dict]) -> int:
+        """Merge several rows in at once — skips any URL already saved (no clobber),
+        saves once at the end. Returns how many were actually added."""
+        added = 0
+        for row in station_rows(rows):
+            url = (row.get("url") or "").strip()
+            if not url or url in self._fav_urls:
+                continue
+            self.favourite.append(dict(row))
+            self._fav_urls.add(url)
+            added += 1
+        if added:
+            self._save()
+        return added
+
+    def import_data(self, favourites=None, history=None) -> int:
+        """Restore a backup: merge favourites (no-clobber) + history (dedup, capped).
+        Returns how many NEW favourites were added."""
+        n = self.add_many(favourites or [])
+        history = station_rows(history)
+        if history:
+            have = {r.get("url") for r in self.history}
+            fresh = [dict(r) for r in history if r.get("url") and r.get("url") not in have]
+            if fresh:
+                self.history = (fresh + self.history)[:HISTORY_MAX]
+                self._save()
+        return n
+
+    def remove(self, url: str) -> None:
+        self.favourite = [r for r in self.favourite if r.get("url") != url]
+        self._fav_urls.discard(url)
+        self._save()
+
+    def toggle(self, row: dict) -> bool:
+        url = row.get("url", "")
+        if self.is_favourite(url):
+            self.remove(url)
+            return False
+        self.add(row)
+        return True
+
+    def set_favicon(self, url: str, favicon_url: str) -> None:
+        """Stamp a derived favicon onto a saved favourite that had none (icon-less stations
+        get one in the background when you add them)."""
+        if not valid_url(favicon_url, web=True):
+            return
+        changed = False
+        for r in self.favourite:
+            if r.get("url") == url and not r.get("favicon"):
+                r["favicon"] = favicon_url
+                changed = True
+        if changed:
+            self._save()
+
+    # ---- history ----
+    def add_history(self, row: dict) -> None:
+        row = station_row(row)
+        if row is None:
+            return
+        url = row.get("url")
+        self.history = [r for r in self.history if r.get("url") != url]
+        self.history.insert(0, dict(row))
+        del self.history[HISTORY_MAX:]
+        self._save()
+
+    # ---- channel contract ----
+    def update_categories(self) -> list[str]:
+        return ["Favorites", "History"]
+
+    def update_streams(self, category: str, search: str | None = None) -> list[dict]:
+        rows = self.history if category == "History" else self.favourite
+        if search:
+            s = search.lower()
+            rows = [r for r in rows if s in r.get("title", "").lower()]
+        # "Now Playing" is a LIVE value — clear any stale stored snapshot for display
+        out = []
+        for r in rows:
+            c = dict(r)
+            c["playing"] = ""
+            out.append(c)
+        return out

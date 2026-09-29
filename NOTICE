@@ -1,0 +1,19 @@
+StreamTuner-ng
+Copyright 2026 IronWolve
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+A from-scratch port and reimagining of StreamTuner2 (Public Domain).
+The original concept is carried forward; original program code is not included.
+
+Separately licensed runtime components include:
+  - Qt 6 / PySide6 Essentials / shiboken6: LGPL-3.0
+  - python-mpv: LGPL-2.1-or-later (selected alternative)
+  - libmpv and selected FFmpeg: LGPL-2.1-or-later for the minimal Windows build
+  - Native transitive libraries and GCC/MinGW runtime: retained individual
+    permissive/LGPL notices and GCC Runtime Library Exception
+  - Python and other dependencies: their respective licenses
+
+See THIRD-PARTY-NOTICES.md, SBOM.json and third-party-licenses/ in binary releases.
+The shared libraries remain replaceable. Nothing in the application license
+restricts modifications or reverse engineering permitted by dependency licenses.

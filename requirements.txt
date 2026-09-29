@@ -1,0 +1,8 @@
+# Runtime dependencies pinned for the 1.3 release.
+PySide6_Essentials==6.11.2
+python-mpv==1.0.8
+requests==2.34.2
+urllib3==2.7.0
+pypresence==4.6.2
+keyring==25.7.0
+defusedxml==0.7.1
