@@ -72,6 +72,12 @@ class Player:
                         pass
                     os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
+            if sys.platform == "darwin" and getattr(sys, "frozen", False):
+                import os
+                # ctypes' macOS finder consults this at lookup time. Resolve from
+                # the running bundle, never from Homebrew or the shell cwd.
+                os.environ["DYLD_LIBRARY_PATH"] = sys._MEIPASS
+
             import mpv  # python-mpv -> libmpv via ctypes
             opts = dict(video=False, idle=True, cache=True,
                         config=False, load_unsafe_playlists=False,

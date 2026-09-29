@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -58,7 +59,8 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         check('bundled window icon resolves', Path(asset_path('logo.png')).is_file())
         try:
             import importlib
-            backend = "keyring.backends.Windows" if os.name == "nt" else "keyring.backends.SecretService"
+            backend = ("keyring.backends.Windows" if os.name == "nt" else
+                       "keyring.backends.macOS" if sys.platform == "darwin" else "keyring.backends.SecretService")
             importlib.import_module(backend)
             check('native credential backend is importable without accessing credentials', True)
         except Exception as exc:

@@ -23,7 +23,12 @@ from ..security import redact_text
 def application_dir() -> Path:
     """The installed application location, independent of the shell's cwd."""
     if getattr(sys, 'frozen', False):
-        return Path(sys.executable).resolve().parent
+        executable = Path(sys.executable).resolve()
+        if (sys.platform == 'darwin' and executable.parent.name == 'MacOS'
+                and executable.parent.parent.name == 'Contents'
+                and executable.parents[2].suffix == '.app'):
+            return executable.parents[3]
+        return executable.parent
     return Path(__file__).resolve().parents[2]
 
 

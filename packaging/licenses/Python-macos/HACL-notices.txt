@@ -1,0 +1,40 @@
+CPython 3.14.7 incorporated HACL code: original copyright/license headers.
+
+Sources: Modules/_hacl/include/krml/FStar_UInt128_Verified.h, Modules/_hacl/include/krml/FStar_UInt_8_16_32_64.h
+
+/*
+  Copyright (c) INRIA and Microsoft Corporation. All rights reserved.
+  Licensed under the Apache 2.0 and MIT Licenses.
+*/
+
+Sources: Modules/_hacl/include/krml/fstar_uint128_struct_endianness.h, Modules/_hacl/include/krml/internal/compat.h, Modules/_hacl/include/krml/internal/target.h, Modules/_hacl/include/krml/internal/types.h, Modules/_hacl/include/krml/lowstar_endianness.h
+
+/* Copyright (c) INRIA and Microsoft Corporation. All rights reserved.
+   Licensed under the Apache 2.0 and MIT Licenses. */
+
+Sources: Modules/_hacl/Hacl_HMAC.c, Modules/_hacl/Hacl_HMAC.h, Modules/_hacl/Hacl_Hash_Blake2b.c, Modules/_hacl/Hacl_Hash_Blake2b.h, Modules/_hacl/Hacl_Hash_Blake2b_Simd256.c, Modules/_hacl/Hacl_Hash_Blake2b_Simd256.h, Modules/_hacl/Hacl_Hash_Blake2s.c, Modules/_hacl/Hacl_Hash_Blake2s.h, Modules/_hacl/Hacl_Hash_Blake2s_Simd128.c, Modules/_hacl/Hacl_Hash_Blake2s_Simd128.h, Modules/_hacl/Hacl_Hash_MD5.c, Modules/_hacl/Hacl_Hash_MD5.h, Modules/_hacl/Hacl_Hash_SHA1.c, Modules/_hacl/Hacl_Hash_SHA1.h, Modules/_hacl/Hacl_Hash_SHA2.c, Modules/_hacl/Hacl_Hash_SHA2.h, Modules/_hacl/Hacl_Hash_SHA3.c, Modules/_hacl/Hacl_Hash_SHA3.h, Modules/_hacl/Hacl_Streaming_HMAC.c, Modules/_hacl/Hacl_Streaming_HMAC.h, Modules/_hacl/Hacl_Streaming_Types.h, Modules/_hacl/internal/Hacl_HMAC.h, Modules/_hacl/internal/Hacl_Hash_Blake2b.h, Modules/_hacl/internal/Hacl_Hash_Blake2b_Simd256.h, Modules/_hacl/internal/Hacl_Hash_Blake2s.h, Modules/_hacl/internal/Hacl_Hash_Blake2s_Simd128.h, Modules/_hacl/internal/Hacl_Hash_MD5.h, Modules/_hacl/internal/Hacl_Hash_SHA1.h, Modules/_hacl/internal/Hacl_Hash_SHA2.h, Modules/_hacl/internal/Hacl_Hash_SHA3.h, Modules/_hacl/internal/Hacl_Impl_Blake2_Constants.h, Modules/_hacl/internal/Hacl_Streaming_HMAC.h, Modules/_hacl/internal/Hacl_Streaming_Types.h
+
+/* MIT License
+ *
+ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
+ * Copyright (c) 2022-2023 HACL* Contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
