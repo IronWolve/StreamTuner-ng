@@ -5,6 +5,8 @@ Uses the app's standard styled dialog (bordered card + drop shadow).
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 from ..security import MAX_IMPORT_BYTES, backup_bundle
@@ -13,28 +15,44 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFontComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QSizePolicy,
 )
 
 from . import theme
 from .dialogs import StyledDialog, info
+from .worker import run_cache, run_io
 
 
 class OptionsDialog(StyledDialog):
     changed = Signal()           # emitted when a plugin is enabled/disabled
     settings_changed = Signal()  # emitted when a general setting (e.g. favicons) changes
     theme_changed = Signal(str)  # emitted when a theme is picked/applied (theme id)
+    visualization_changed = Signal(str)
+    volume_changed = Signal(int)
+    album_art_changed = Signal(bool)
     themes_reloaded = Signal()   # emitted when a theme is imported (the registry changed)
     cache_cleared = Signal()     # emitted when the disk cache is cleared (window drops its in-memory cache)
+    cache_clearing = Signal()    # invalidate pending cache refreshes before the disk clear is queued
+    icons_clearing = Signal()    # invalidate pending icon requests before the icon files are removed
+    icons_cleared = Signal()     # emitted after icon files have been removed
     data_imported = Signal()     # emitted after a JSON backup is imported (window refreshes favourites/local)
     wallpaper_changed = Signal() # emitted when the wallpaper image / dim / on-off changes
+    wallpaper_dim_changed = Signal(int) # opacity-only update; must not reload or rescale the image
     font_changed = Signal()      # emitted when the app font family/size changes
 
     def __init__(self, host, config=None, parent=None, mode: str = "dark"):
         super().__init__(parent, "Options", mode)
         self.host = host
         self.config = config
+        if self.config is not None:
+            self.config.enable_async_writes()
         self.muted = "#9aa3ad" if theme.is_dark(mode) else "#566070"   # secondary text, readable on dark/light
-        self.resize(620, 600)
+        self._closed = False
+        self._operation_generation = 0
+        self._usage_generation = 0
+        self._data_cancel = None
+        self.finished.connect(self._mark_closed)
+        self.resize(740, 600)
         tabs = QTabWidget()
         tabs.addTab(self._scroll(self._plugins_tab()), "Plugins")
         tabs.addTab(self._scroll(self._themes_tab()), "Themes")
@@ -45,6 +63,31 @@ class OptionsDialog(StyledDialog):
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         self.add_buttons(close)
+
+    def _mark_closed(self, *_args) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._operation_generation += 1
+        if self._data_cancel is not None:
+            self._data_cancel.set()
+
+    def closeEvent(self, event) -> None:
+        # QDialog.finished covers accept/reject/done; a window-manager close can
+        # reach closeEvent directly, so cancel outstanding disk work there too.
+        self._mark_closed()
+        super().closeEvent(event)
+
+    def _next_operation(self) -> int:
+        self._operation_generation += 1
+        return self._operation_generation
+
+    @staticmethod
+    def _error_text(result) -> str:
+        return f"{type(result).__name__}: {result}" if isinstance(result, BaseException) else ""
+
+    def _parent_is_closing(self) -> bool:
+        return bool(getattr(self.parent(), "_closing", False))
 
     def _scroll(self, w: QWidget) -> QWidget:
         """Wrap a tab page so it scrolls when its content is taller than the dialog — otherwise a
@@ -162,6 +205,7 @@ class OptionsDialog(StyledDialog):
         v.addWidget(QLabel("<b>Disk usage</b>"))
         self._usage_lbl = QLabel()
         self._usage_lbl.setStyleSheet(f"color:{self.muted};")
+        self._usage_lbl.setText("Calculating disk usage…")
         v.addWidget(self._usage_lbl)
         self._refresh_usage()
 
@@ -211,11 +255,11 @@ class OptionsDialog(StyledDialog):
         v.addSpacing(10)
         v.addWidget(QLabel("<b>Maintenance</b>"))
         h1 = QHBoxLayout()
-        b_cache = QPushButton("Clear station cache")
-        b_cache.clicked.connect(self._clear_cache_clicked)
-        b_icons = QPushButton("Clear icon cache")
-        b_icons.clicked.connect(self._clear_icons_clicked)
-        h1.addWidget(b_cache); h1.addWidget(b_icons); h1.addStretch(1)
+        self._clear_cache_button = QPushButton("Clear station cache")
+        self._clear_cache_button.clicked.connect(self._clear_cache_clicked)
+        self._clear_icons_button = QPushButton("Clear icon cache")
+        self._clear_icons_button.clicked.connect(self._clear_icons_clicked)
+        h1.addWidget(self._clear_cache_button); h1.addWidget(self._clear_icons_button); h1.addStretch(1)
         v.addLayout(h1)
         mh = QLabel("Cached station lists make relaunch instant; clearing just re-fetches them.")
         mh.setWordWrap(True); mh.setStyleSheet(f"color:{self.muted};")
@@ -224,11 +268,11 @@ class OptionsDialog(StyledDialog):
         v.addSpacing(10)
         v.addWidget(QLabel("<b>Backup &amp; restore</b>"))
         h2 = QHBoxLayout()
-        b_exp = QPushButton("Export… (JSON)")
-        b_exp.clicked.connect(self._export_data_clicked)
-        b_imp = QPushButton("Import…")
-        b_imp.clicked.connect(self._import_data_clicked)
-        h2.addWidget(b_exp); h2.addWidget(b_imp); h2.addStretch(1)
+        self._export_data_button = QPushButton("Export… (JSON)")
+        self._export_data_button.clicked.connect(self._export_data_clicked)
+        self._import_data_button = QPushButton("Import…")
+        self._import_data_button.clicked.connect(self._import_data_clicked)
+        h2.addWidget(self._export_data_button); h2.addWidget(self._import_data_button); h2.addStretch(1)
         v.addLayout(h2)
         bh = QLabel("Export saves your settings, favorites, history and local stations to one JSON "
                     "file (listen keys excluded). Import merges a backup back in — nothing is overwritten.")
@@ -245,24 +289,70 @@ class OptionsDialog(StyledDialog):
     def _refresh_usage(self) -> None:
         if not self.config:
             return
-        u = self.config.data_usage()
+        self._usage_generation += 1
+        generation = self._usage_generation
+        self._usage_lbl.setText("Calculating disk usage…")
+        run_cache(self.config.data_usage,
+                  lambda result, g=generation: self._usage_finished(g, result))
+
+    def _usage_finished(self, generation: int, result) -> None:
+        if self._closed or generation != self._usage_generation:
+            return
+        error = self._error_text(result)
+        if error:
+            self._usage_lbl.setText("Disk usage unavailable: " + self.config.redact(error))
+            return
 
         def mb(n):
             return f"{n / 1048576:.1f} MB"
-        self._usage_lbl.setText(f"Station cache: {mb(u['cache'])}  ({u['cache_files']} files)\n"
-                                f"Icon cache: {mb(u['icons'])}\n"
-                                f"Total: {mb(u['total'])}")
+        self._usage_lbl.setText(f"Station cache: {mb(result['cache'])}  ({result['cache_files']} files)\n"
+                                f"Icon cache: {mb(result['icons'])}\n"
+                                f"Total: {mb(result['total'])}")
 
     def _clear_cache_clicked(self) -> None:
         if not self.config:
             return
-        self.config.cache_clear_disk()
-        self.cache_cleared.emit()           # window drops its in-memory cache + reloads
-        self._refresh_usage()
+        self._clear_cache_button.setEnabled(False)
+        self._data_msg.setText("Clearing station cache…")
+        self.cache_clearing.emit()
+        run_cache(self.config.cache_clear_disk, self._cache_clear_finished)
+
+    def _cache_clear_finished(self, result) -> None:
+        error = self._error_text(result)
+        if error:
+            if not self._closed:
+                self._clear_cache_button.setEnabled(True)
+                self._data_msg.setText("Could not clear station cache: " + self.config.redact(error))
+            return
+        # MainWindow must invalidate every pending refresh before the operation starts, then
+        # reload from the disk only after the serialized clear has actually completed.
+        if not self._parent_is_closing():
+            self.cache_cleared.emit()
+        if not self._closed:
+            self._clear_cache_button.setEnabled(True)
+            self._data_msg.setText(f"Cleared {int(result):,} station-cache file(s).")
+            self._refresh_usage()
 
     def _clear_icons_clicked(self) -> None:
-        if self.config:
-            self.config.clear_icons()
+        if not self.config:
+            return
+        self._clear_icons_button.setEnabled(False)
+        self._data_msg.setText("Clearing icon cache…")
+        self.icons_clearing.emit()
+        run_cache(self.config.clear_icons, self._icons_clear_finished)
+
+    def _icons_clear_finished(self, result) -> None:
+        error = self._error_text(result)
+        if error:
+            if not self._closed:
+                self._clear_icons_button.setEnabled(True)
+                self._data_msg.setText("Could not clear icon cache: " + self.config.redact(error))
+            return
+        if not self._parent_is_closing():
+            self.icons_cleared.emit()
+        if not self._closed:
+            self._clear_icons_button.setEnabled(True)
+            self._data_msg.setText(f"Cleared {int(result):,} icon-cache file(s).")
             self._refresh_usage()
 
     def _set_icon_mode(self, mode: str) -> None:
@@ -281,6 +371,8 @@ class OptionsDialog(StyledDialog):
 
     def _export_data_clicked(self) -> None:
         import json
+        import os
+        import tempfile
         from PySide6.QtWidgets import QFileDialog
         if not self.config:
             return
@@ -288,12 +380,59 @@ class OptionsDialog(StyledDialog):
                                               "streamtuner-ng-backup.json", "JSON (*.json)")
         if not path:
             return
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.config.export_bundle(), f, indent=2, ensure_ascii=False)
-            self._data_msg.setText(f"Exported to {path}")
-        except OSError as e:
-            self._data_msg.setText(f"Export failed: {e}")
+        destination = Path(path)
+        generation = self._begin_data_operation("Exporting backup…")
+        cancelled = self._data_cancel
+
+        def export() -> str:
+            if cancelled.is_set():
+                raise CancelledError()
+            payload = self.config.export_bundle()
+            if cancelled.is_set():
+                raise CancelledError()
+            fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp",
+                                             dir=str(destination.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    encoder = json.JSONEncoder(indent=2, ensure_ascii=False)
+                    for chunk in encoder.iterencode(payload):
+                        if cancelled.is_set():
+                            raise CancelledError()
+                        stream.write(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if cancelled.is_set():
+                    raise CancelledError()
+                os.replace(temporary, destination)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            return str(destination)
+
+        run_io(export, lambda result, g=generation: self._export_finished(g, result), cancelled=cancelled)
+
+    def _begin_data_operation(self, message: str) -> int:
+        generation = self._next_operation()
+        self._data_cancel = threading.Event()
+        self._export_data_button.setEnabled(False)
+        self._import_data_button.setEnabled(False)
+        self._data_msg.setText(message)
+        return generation
+
+    def _finish_data_operation(self, generation: int, message: str) -> bool:
+        if self._closed or generation != self._operation_generation:
+            return False
+        self._export_data_button.setEnabled(True)
+        self._import_data_button.setEnabled(True)
+        self._data_msg.setText(message)
+        return True
+
+    def _export_finished(self, generation: int, result) -> None:
+        error = self._error_text(result)
+        if error:
+            self._finish_data_operation(generation, "Export failed: " + self.config.redact(error))
+        else:
+            self._finish_data_operation(generation, f"Exported to {result}")
 
     def _import_data_clicked(self) -> None:
         import json
@@ -303,26 +442,124 @@ class OptionsDialog(StyledDialog):
         path, _ = QFileDialog.getOpenFileName(self, "Import settings & data", "", "JSON (*.json)")
         if not path:
             return
-        try:
+        self._begin_data_operation("Reading and validating backup…")
+        generation = self._operation_generation
+        cancelled = self._data_cancel
+
+        def parse_and_prepare():
+            if cancelled.is_set():
+                raise CancelledError()
             if Path(path).stat().st_size > MAX_IMPORT_BYTES:
                 raise ValueError("Backup exceeds the import size limit")
             with open(path, encoding="utf-8") as f:
-                data = backup_bundle(json.load(f))
-        except (OSError, ValueError, RecursionError) as exc:
-            self._data_msg.setText(self.config.redact(exc))
-            return
-        self.config.import_settings(data["settings"])
-        nf = nl = 0
+                raw = json.load(f)
+            if cancelled.is_set():
+                raise CancelledError()
+            data = backup_bundle(raw)
+            if cancelled.is_set():
+                raise CancelledError()
+            return self._prepare_import_plans(data, cancelled)
+
+        run_io(parse_and_prepare,
+               lambda result, g=generation: self._import_prepared(g, result, cancelled),
+               cancelled=cancelled)
+
+    def _prepare_import_plans(self, data, cancelled):
+        """Normalize and validate both potentially large station lists off the UI thread."""
+        if cancelled.is_set():
+            raise CancelledError()
         bm = self.host.channels.get("bookmarks") if self.host else None
-        if bm is not None:
-            nf = bm.import_data(data["favourite"], data["history"])
         loc = self.host.channels.get("local") if self.host else None
-        if loc is not None:
-            nl = loc.add_many(data["stations"])
-        self.settings_changed.emit()    # apply merged general settings
+        bookmark_plan = (bm.prepare_import(data["favourite"], data["history"])
+                         if bm is not None else None)
+        if cancelled.is_set():
+            raise CancelledError()
+        local_plan = loc.prepare_many(data["stations"]) if loc is not None else None
+        if cancelled.is_set():
+            raise CancelledError()
+        return data, bookmark_plan, local_plan
+
+    def _queue_import_replan(self, generation: int, data, cancelled, retries: int) -> None:
+        if cancelled.is_set() or self._closed or generation != self._operation_generation:
+            return
+        self._data_msg.setText("Saved data changed during import; rechecking backup…")
+        run_io(lambda: self._prepare_import_plans(data, cancelled),
+               lambda result, g=generation, d=data, c=cancelled, n=retries:
+                   self._import_prepared(g, result, c, n),
+               cancelled=cancelled)
+
+    def _import_prepared(self, generation: int, prepared, cancelled, retries: int = 0) -> None:
+        error = self._error_text(prepared)
+        if error:
+            self._finish_data_operation(generation, "Import failed: " + self.config.redact(error))
+            return
+        if self._closed or generation != self._operation_generation:
+            return
+        data, bookmark_plan, local_plan = prepared
+        self._data_msg.setText("Merging backup into saved data…")
+        bm = self.host.channels.get("bookmarks") if self.host else None
+        loc = self.host.channels.get("local") if self.host else None
+        # Both snapshots must still match before either channel is changed. Preparation and
+        # normalization run on the worker; this check and the small state swaps stay on UI.
+        current = ((bm is None or bm.plan_is_current(bookmark_plan))
+                   and (loc is None or loc.plan_is_current(local_plan)))
+        if not current:
+            if retries >= 4:
+                self._finish_data_operation(
+                    generation, "Import paused because Favorites or Local kept changing; please try again."
+                )
+            else:
+                self._queue_import_replan(generation, data, cancelled, retries + 1)
+            return
+        try:
+            nf = 0
+            nl = 0
+            bookmarks_current = bm is None or bm.apply_import_plan(bookmark_plan)
+            local_current = loc is None or loc.apply_many_plan(local_plan)
+            if not (bookmarks_current and local_current):
+                if retries >= 4:
+                    self._finish_data_operation(
+                        generation, "Import paused because Favorites or Local kept changing; please try again."
+                    )
+                else:
+                    self._queue_import_replan(generation, data, cancelled, retries + 1)
+                return
+            nf = bookmark_plan.favorites_added if bookmark_plan is not None else 0
+            nl = local_plan.stations_added if local_plan is not None else 0
+            # Save settings only after both list merges have passed their preflight and commit.
+            self.config.import_settings(data["settings"])
+        except Exception as exc:  # noqa: BLE001 — report storage/limit failures in the dialog
+            self._finish_data_operation(generation, "Import failed: " + self.config.redact(exc))
+            return
+        self.theme_changed.emit(self.config.get("theme", "dark"))
+        self.visualization_changed.emit(self.config.get("visualization", "off"))
+        self.volume_changed.emit(self.config.get("volume", 70))
+        self.album_art_changed.emit(bool(self.config.get("show_album_art", True)))
+        self.settings_changed.emit()    # apply remaining general settings
         self.data_imported.emit()       # window drops cache + reloads so favourites/local show
         self._refresh_usage()
-        self._data_msg.setText(f"Imported +{nf} favorites and +{nl} local stations; settings merged.")
+        self._data_msg.setText("Import merged; saving settings, Favorites and Local…")
+        run_io(lambda: self.config.flush_writes(timeout=5),
+               lambda result, g=generation, f=nf, l=nl: self._import_saved(g, f, l, result))
+
+    def _import_saved(self, generation: int, favourites: int, stations: int, result) -> None:
+        if self._closed or generation != self._operation_generation:
+            return
+        errors = self.config.take_write_errors()
+        if errors:
+            detail = "; ".join(errors[:2])
+            self._finish_data_operation(
+                generation, f"Import merged (+{favourites} favorites, +{stations} local), but saving failed: {detail}"
+            )
+            return
+        if isinstance(result, BaseException) or not result:
+            self._finish_data_operation(
+                generation, f"Import merged (+{favourites} favorites, +{stations} local); save is not confirmed yet."
+            )
+            return
+        self._finish_data_operation(
+            generation, f"Imported +{favourites} favorites and +{stations} local stations; settings saved."
+        )
 
     def _plugins_tab(self) -> QWidget:
         w = QWidget()
@@ -335,6 +572,7 @@ class OptionsDialog(StyledDialog):
         ordered += sorted((ch for cid, ch in chans.items()
                            if cid not in internal and not ch.test_only),
                           key=lambda c: c.title.lower())                # then the services, A–Z
+        self._plugin_visibility_checks = {}
         row = 1
         for ch in ordered:
             cid = ch.id
@@ -343,6 +581,7 @@ class OptionsDialog(StyledDialog):
             if not is_internal:                  # internal channels are always on — no health dot
                 dot.setPixmap(theme.status_icon(self.host.health[cid].status).pixmap(14, 14))
             cb = QCheckBox(ch.title)
+            cb.setObjectName(f"pluginEnabled_{cid}")
             if is_internal:
                 cb.setChecked(True)
                 cb.setEnabled(False)             # locked on (built-in feature, not a toggleable plugin)
@@ -350,28 +589,50 @@ class OptionsDialog(StyledDialog):
             else:
                 cb.setChecked(self.host.is_enabled(cid))
                 cb.toggled.connect(lambda on, c=cid: self._toggle(c, on))
+            cb.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             desc = QLabel(ch.description)
             desc.setStyleSheet(f"color: {self.muted};")
+            desc.setWordWrap(True)
+            desc.setMinimumWidth(0)
+            desc.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             g.addWidget(dot, row, 0)
             g.addWidget(cb, row, 1)
-            g.addWidget(desc, row, 2)
             if not is_internal:
                 ic = QCheckBox("icons")
                 ic.setChecked(bool(self.config.get(f"stream_icons_{cid}", True)) if self.config else True)
                 ic.setToolTip("Load each station's icon from its stream when available (if possible). "
                               "Off = just this service's logo for every station — handy on huge directories.")
                 ic.toggled.connect(lambda on, c=cid: self._toggle_stream_icons(c, on))
-                g.addWidget(ic, row, 3)
+                g.addWidget(ic, row, 2)
+                visible = QCheckBox("Show in sidebar")
+                visible.setObjectName(f"pluginVisible_{cid}")
+                visible.setChecked(self.host.is_visible(cid))
+                visible.setEnabled(self.host.is_enabled(cid))
+                visible.toggled.connect(lambda on, c=cid: self._toggle_visibility(c, on))
+                g.addWidget(visible, row, 3)
+                self._plugin_visibility_checks[cid] = visible
                 log = QPushButton("View Log")
+                log.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
                 log.clicked.connect(lambda _=False, c=cid: self._view_log(c))
                 g.addWidget(log, row, 4)
-            row += 1
-        g.setColumnStretch(2, 1)
+            g.addWidget(desc, row + 1, 1, 1, 4)
+            row += 2
+        g.setColumnStretch(1, 1)
+        g.setColumnStretch(2, 0)
+        g.setColumnStretch(3, 0)
+        g.setColumnStretch(4, 0)
         g.setRowStretch(row, 1)
         return w
 
     def _toggle(self, cid: str, on: bool) -> None:
         self.host.set_enabled(cid, on)
+        visibility = self._plugin_visibility_checks.get(cid)
+        if visibility is not None:
+            visibility.setEnabled(on)
+        self.changed.emit()
+
+    def _toggle_visibility(self, cid: str, on: bool) -> None:
+        self.host.set_visible(cid, on)
         self.changed.emit()
 
     def _toggle_stream_icons(self, cid: str, on: bool) -> None:
@@ -522,7 +783,9 @@ class OptionsDialog(StyledDialog):
                 self.config.set("wallpaper_enabled", True)
             self.config.save_settings()
         if spec and hasattr(self, "_wp_enable"):
+            self._wp_enable.blockSignals(True)
             self._wp_enable.setChecked(True)
+            self._wp_enable.blockSignals(False)
         self._refresh_wp_label()
         self.wallpaper_changed.emit()
 
@@ -530,7 +793,7 @@ class OptionsDialog(StyledDialog):
         if self.config is not None:
             self.config.set("wallpaper_dim", int(v))
             self.config.save_settings()
-        self.wallpaper_changed.emit()
+        self.wallpaper_dim_changed.emit(int(v))
 
     def _fill_theme_combo(self) -> None:
         self._theme_combo.blockSignals(True)

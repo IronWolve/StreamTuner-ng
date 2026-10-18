@@ -12,7 +12,12 @@ the schema and the two required keys (title, url).
 
 from __future__ import annotations
 
+import threading
 from typing import Any
+
+from .result import Page
+
+_SNAPSHOT_INIT_LOCK = threading.Lock()
 
 # The station row schema. title + url are required; the rest have sane defaults.
 ROW_DEFAULTS: dict[str, Any] = {
@@ -74,12 +79,60 @@ class Channel:
 
     def __init__(self, config: Any = None):
         self.config = config
+        self._ensure_snapshot_state()
         if not self.id:
             self.id = type(self).__name__.lower().lstrip("_")
 
     # --- the contract (override these) ---
+    def _ensure_snapshot_state(self) -> None:
+        # Older drop-in plugins sometimes define __init__ without calling super.
+        if hasattr(self, "_snapshot_lock"):
+            return
+        with _SNAPSHOT_INIT_LOCK:
+            if not hasattr(self, "_snapshot_lock"):
+                self._snapshot_lock = threading.RLock()
+                self._snapshot_generation = 0
+                self._snapshot_values = {}
+                self._snapshot_versions = {}
+
     def invalidate_cache(self) -> None:
-        """Discard provider-owned snapshots before an explicit refresh."""
+        """Advance the snapshot generation without discarding last-good values."""
+        self._ensure_snapshot_state()
+        with self._snapshot_lock:
+            self._snapshot_generation += 1
+
+    def _snapshot_read(self, key: str) -> tuple[int, Any, bool]:
+        """Return the active generation, its value if present, and whether it is current."""
+        self._ensure_snapshot_state()
+        with self._snapshot_lock:
+            generation = self._snapshot_generation
+            current = self._snapshot_versions.get(key) == generation and key in self._snapshot_values
+            return generation, self._snapshot_values.get(key), current
+
+    def _snapshot_publish(self, key: str, generation: int, value: Any) -> Any:
+        """Publish only into the generation that initiated the load.
+
+        A late pre-refresh request may still return its own result to its caller,
+        but it cannot replace the newer provider snapshot.
+        """
+        self._ensure_snapshot_state()
+        with self._snapshot_lock:
+            if generation == self._snapshot_generation:
+                self._snapshot_values[key] = value
+                self._snapshot_versions[key] = generation
+                return value
+            if self._snapshot_versions.get(key) == self._snapshot_generation:
+                return self._snapshot_values[key]
+            return value
+
+    def _snapshot_after_error(self, key: str, generation: int) -> tuple[bool, Any]:
+        """A stale failed request may use a newer result; current failures still raise."""
+        self._ensure_snapshot_state()
+        with self._snapshot_lock:
+            if (generation != self._snapshot_generation
+                    and self._snapshot_versions.get(key) == self._snapshot_generation):
+                return True, self._snapshot_values[key]
+            return False, None
 
     def refresh_categories(self) -> list[str]:
         self.invalidate_cache()
@@ -99,7 +152,7 @@ class Channel:
         return []
 
     def update_streams_page(self, category: str, offset: int = 0,
-                            limit: int | None = None, search: str | None = None) -> list[dict]:
+                            limit: int | None = None, search: str | None = None) -> list[dict] | Page:
         """Optional pagination hook. Default: page 0 returns everything (via
         update_streams), no further pages — so non-paginated channels work
         unchanged. Channels that set `page_size` override this to stream big

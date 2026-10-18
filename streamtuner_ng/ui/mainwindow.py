@@ -6,24 +6,27 @@ keeps the airlock off the UI thread via worker.run_async.
 from __future__ import annotations
 
 import time
+import threading
+from collections import OrderedDict
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QPushButton, QSlider, QSplitter, QTableView,
     QToolBar, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__
 from ..player.mpv_player import clean_icy_title
-from ..plugins.result import Result
+from ..plugins.result import Result, Status
 from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, redact_url, station_row, valid_url
 from . import theme
 from .models import COLUMNS, FILTER_ROLE, SORT_ROLE, StationModel
 from .spectrogram import Spectrogram
 from .vumeter import VuMeter
-from .worker import run_async, run_io, run_cache
+from .worker import run_async, run_io, run_cache, run_playback
+from .cache import CatalogCache
 
 
 class MainWindow(QMainWindow):
@@ -52,16 +55,36 @@ class MainWindow(QMainWindow):
         self._cache_epoch: dict[str, int] = {}
         self._loading_key = None
         self._page_retries = set()
+        self._load_cancel = threading.Event()
+        self._play_cancel = threading.Event()
+        self._icon_cancel = threading.Event()
+        self._cache_events = {}
+        self._cache_generation = 0
+        self._icon_epoch = 0
+        self._icon_retry_at = OrderedDict()
+        self._cat_ages = {}
+        self._load_complete = True
+        self._load_errors = []
+        self._load_started = False
+        self._retain_during_load = False
+        self._fresh_rows = []
+        self._fresh_seen = set()
+        self._refresh_view_key = None
+        self._icons_clearing = False
+        self._refreshing = False
+        self._pending_restore = None
+        self._search_failures = {}
         self.ALL_LIMIT = 100000
         self._collapsed = set(self.config.get("collapsed_groups", []) or [])
-        self._cache: dict[tuple, list] = {}   # (channel, category) -> full station list
+        self._cache = CatalogCache()   # (channel, category) -> full station list
         self._cat_cache: dict[str, list] = {}  # channel -> category list (cached on first visit)
         self._aa_key = (self.config.get("audioaddict_listen_key", "") or "").strip()  # detect key changes
         self._favicons: dict[str, str] = {}   # channel id -> cached favicon path
         self._svc_icons: dict = {}            # channel id -> QIcon, generic fallback for icon-less rows
-        self._station_icons: dict = {}        # station favicon URL -> QIcon (None = in-flight)
-        self._derived_icons: dict = {}        # station URL -> QIcon for favicon-less rows (SHOUTcast/TuneIn); None=in-flight, "miss"=none
+        self._station_icons = OrderedDict()        # station favicon URL -> QIcon (None = in-flight)
+        self._derived_icons = OrderedDict()        # station URL -> QIcon for favicon-less rows (SHOUTcast/TuneIn); None=in-flight, "miss"=none
         self._station_favicons = self.config.icon_mode() != "off"   # off -> service logo for all (full/small differ only on disk)
+        self._pending_play = False
         self._playing_row: dict | None = None     # the row currently streaming (for the album-art box)
         self._show_art = bool(self.config.get("show_album_art", True))
         self._viz = self.config.get("visualization", "")
@@ -103,7 +126,7 @@ class MainWindow(QMainWindow):
         self._stats_timer.start(1000)
         self._vu_timer = QTimer(self)            # ~30 fps level-meter poll
         self._vu_timer.timeout.connect(self._tick_viz)
-        self._vu_timer.start(33)
+        # Visual polling starts only for visible, active playback.
         self._bg_inflight: set = set()           # (cid, cat) currently being background-refreshed
         self._refresh_timer = QTimer(self)       # periodic freshening of the viewed category
         self._refresh_timer.timeout.connect(self._periodic_refresh)
@@ -139,21 +162,22 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_reload)
         tb.addAction(self.act_fav)
         tb.addSeparator()                       # | between Favorite and the transport
-        tb.addAction(self.act_play)
-        tb.addAction(self.act_stop)
-        tb.addSeparator()                       # | between transport and Search
         tb.addWidget(QLabel(" Search: "))
         self.search = QLineEdit()
         self.search.setPlaceholderText("filter…  (Enter = search the directory)")
         self.search.setClearButtonEnabled(True)   # ✕ button to clear the filter
-        self.search.setMaximumWidth(240)
+        self.search.setMinimumWidth(180)
         self.search.textChanged.connect(self._on_search)        # type = instant client-side filter
         self.search.returnPressed.connect(self._search_enter)   # Enter = server-side directory search
         tb.addWidget(self.search)
-        self.btn_search_all = QPushButton("All Sources")
-        self.btn_search_all.setCheckable(True)                  # lit = Enter searches every source at once
-        self.btn_search_all.setToolTip("When lit, Enter searches every search-capable source and merges results")
-        tb.addWidget(self.btn_search_all)
+        self.search_scope = QComboBox()
+        self.search_scope.addItems(["Loaded list", "This source", "All sources"])
+        self.search_scope.currentIndexChanged.connect(self._scope_changed)
+        tb.addWidget(self.search_scope)
+        self.search_submit = QPushButton("Search")
+        self.search_submit.clicked.connect(self._search_enter)
+        self._search_submit_action = tb.addWidget(self.search_submit)
+        self._scope_changed()
 
     def _build_panes(self) -> None:
         self.channels = QListWidget()
@@ -186,10 +210,12 @@ class MainWindow(QMainWindow):
         hdr.setSectionResizeMode(QHeaderView.Interactive)   # drag edges to resize
         hdr.setStretchLastSection(True)                     # last column fills the gap
         # Station Genre Bitrate Codec Listeners Votes Country Description NowPlaying URL
-        for col, w in enumerate((270, 110, 65, 65, 80, 75, 130, 200, 200, 320)):
+        for col, w in enumerate((230, 100, 60, 60, 80, 65, 95, 200, 200, 320)):
             self.table.setColumnWidth(col, w)
         self.table.doubleClicked.connect(self._play_selected)
         self.table.clicked.connect(self._on_station_clicked)
+        self.table.selectionModel().currentRowChanged.connect(lambda *_: self._sync_selection_actions())
+        self.table.verticalScrollBar().sliderPressed.connect(lambda: setattr(self, "_pending_restore", None))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._station_menu)
 
@@ -204,9 +230,32 @@ class MainWindow(QMainWindow):
         self.art.hide()
         self._services_pane.installEventFilter(self)
         split.addWidget(self._titled_pane("Categories", self.categories))
-        split.addWidget(self.table)         # already has column headers
+        station_pane = QWidget()
+        station_layout = QVBoxLayout(station_pane)
+        station_layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        self._list_notice = QLabel("Choose a service to browse stations")
+        self._list_notice.setTextFormat(Qt.PlainText)
+        self._list_notice.setWordWrap(True)
+        row.addWidget(self._list_notice, 1)
+        self._back_button = QPushButton("Back to category")
+        self._back_button.clicked.connect(self._back_to_category)
+        self._back_button.hide()
+        row.addWidget(self._back_button)
+        self._retry_button = QPushButton("Retry")
+        self._retry_button.clicked.connect(self._retry_failed_search)
+        self._retry_button.hide()
+        row.addWidget(self._retry_button)
+        self._cancel_button = QPushButton("Cancel loading")
+        self._cancel_button.clicked.connect(self._cancel_load)
+        self._cancel_button.hide()
+        row.addWidget(self._cancel_button)
+        station_layout.addLayout(row)
+        station_layout.addWidget(self.table)
+        split.addWidget(station_pane)
+        self._split = split
         split.setStretchFactor(2, 1)
-        split.setSizes([180, 200, 660])
+        split.setSizes([160, 170, 730])
 
         from .wallpaper import WallpaperWidget
         central = WallpaperWidget()           # paints the optional wallpaper behind everything
@@ -320,6 +369,7 @@ class MainWindow(QMainWindow):
             self.spectro.reset_width()
         for m, a in self._viz_actions.items():
             a.setChecked(m == mode)
+        self._sync_visualizer()
 
     def _build_playerbar(self) -> None:
         bar = QWidget()
@@ -334,6 +384,7 @@ class MainWindow(QMainWindow):
         self.btn_play.toggled.connect(lambda on: self.btn_play.setText("■" if on else "▶"))
         # (no station icon here — the now-playing artwork lives in the bottom-left art box)
         self.np_label = QLabel("Stopped")
+        self.np_label.setTextFormat(Qt.PlainText)
         self.np_label.setMinimumWidth(200)
         self.np_label.setContextMenuPolicy(Qt.CustomContextMenu)        # right-click the track for options
         self.np_label.customContextMenuRequested.connect(self._nowplaying_menu)
@@ -394,13 +445,24 @@ class MainWindow(QMainWindow):
 
         m_view = mb.addMenu("&View")
         m_view.addAction(QAction("Reload current channel", self, shortcut="F5", triggered=self._reload))
+        columns_menu = m_view.addMenu("Columns")
+        self._column_actions = {}
+        saved_columns = self.config.get("visible_columns", [])
+        for label, field in COLUMNS:
+            action = QAction(label, self, checkable=True)
+            action.setChecked(field == "title" or (field in saved_columns if saved_columns else field != "url"))
+            action.setEnabled(field != "title")
+            action.setToolTip("Shown when this service supplies the field")
+            action.toggled.connect(lambda on, name=field: self._set_column_visible(name, on))
+            columns_menu.addAction(action)
+            self._column_actions[field] = action
         self._art_action = QAction("Show album art", self, checkable=True)
         self._art_action.setChecked(self._show_art)
         self._art_action.triggered.connect(self._toggle_art)
         m_view.addAction(self._art_action)
         viz_menu = m_view.addMenu("Visualization")
         self._viz_actions = {}
-        for mode, label in (("off", "Off"), ("vu", "VU Meter"), ("spectrogram", "Spectrogram")):
+        for mode, label in (("off", "Off"), ("vu", "VU Meter"), ("spectrogram", "Level history")):
             a = QAction(label, self, checkable=True)
             a.setChecked(self._viz == mode)
             a.triggered.connect(lambda _=False, m=mode: self._set_visualization(m))
@@ -415,7 +477,7 @@ class MainWindow(QMainWindow):
         self._wallpaper_menu = m_view.addMenu("Wallpaper")
         self._rebuild_wallpaper_menu()
 
-        self.m_channels = mb.addMenu("&Channels")
+        self.m_channels = mb.addMenu("&Services")
         self._rebuild_channels_menu()
 
         m_play = mb.addMenu("&Playback")
@@ -436,6 +498,7 @@ class MainWindow(QMainWindow):
 
     # ---- channel sidebar ----
     def _populate_channels(self) -> None:
+        previous = self.current_channel
         self.channels.blockSignals(True)
         self.channels.clear()
         chans = list(self.host.shown_channels())
@@ -459,11 +522,17 @@ class MainWindow(QMainWindow):
             self._add_channel_separator()
         for ch in rest:
             add(ch)
+        chosen = next((i for i in range(self.channels.count())
+                       if self.channels.item(i).data(Qt.UserRole) == previous), None)
+        same = chosen is not None
+        if chosen is None:
+            chosen = next((i for i in range(self.channels.count())
+                           if self.channels.item(i).data(Qt.UserRole)), None)
+        if chosen is not None:
+            self.channels.setCurrentRow(chosen)
         self.channels.blockSignals(False)
-        for i in range(self.channels.count()):   # select the first real (non-separator) channel
-            if self.channels.item(i).data(Qt.UserRole):
-                self.channels.setCurrentRow(i)
-                break
+        if chosen is not None and not same:
+            self._on_channel(self.channels.currentItem(), None)
 
     def _add_channel_separator(self) -> None:
         """A thin divider line in the Services list (separates Favorites/Local from the services)."""
@@ -496,7 +565,12 @@ class MainWindow(QMainWindow):
                 a.setChecked(True)
                 a.setEnabled(False)
             else:
-                a.setChecked(self.host.is_visible(ch.id) and self.host.is_enabled(ch.id))
+                enabled = self.host.is_enabled(ch.id)
+                a.setChecked(self.host.is_visible(ch.id) and enabled)
+                a.setEnabled(enabled)
+                if not enabled:
+                    a.setText(ch.title + " (disabled)")
+                    a.setToolTip("Enable this service in Options → Plugins")
                 a.toggled.connect(lambda on, c=ch.id: self._set_visible(c, on))
             self.m_channels.addAction(a)
 
@@ -613,11 +687,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{label} saved", 3000)
 
     def _export_rows(self, rows, suggested: str) -> None:
-        """Save a station list to CSV (used by the right-click Export actions)."""
+        """Save a stable station-list snapshot to CSV without blocking the UI."""
         import csv
+        import os
+        import tempfile
+        from concurrent.futures import CancelledError
+        from pathlib import Path
         from PySide6.QtWidgets import QFileDialog
-        rows = list(rows or [])
-        if not rows:
+
+        snapshot = tuple(rows or ())
+        if not snapshot:
             self.statusBar().showMessage("Nothing to export — the list is empty.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Export list", suggested, "CSV files (*.csv)")
@@ -625,76 +704,125 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith(".csv"):
             path += ".csv"
+        destination = Path(path)
         cols = [("title", "Title"), ("url", "URL"), ("genre", "Genre"), ("country", "Country"),
                 ("bitrate", "Bitrate"), ("format", "Format"), ("homepage", "Homepage")]
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                wr = csv.writer(f)
-                wr.writerow([h for _k, h in cols])
-                for r in rows:
-                    wr.writerow([csv_cell(r.get(k, ""), self.config.secrets._cache.values()) for k, _h in cols])
-            self.statusBar().showMessage(f"Exported {len(rows)} station(s) → {path}")
-        except OSError as e:
-            self.statusBar().showMessage(f"Export failed: {e}")
+        # Favorites/Local replace rows on mutation; they do not edit them in place.
+        # Capturing the tuple keeps the exact list version selected by the user.
+        secret_snapshot = tuple(self.config.secrets._cache.copy().values())
+        cancel = threading.Event()
+        if not hasattr(self, "_export_cancels"):
+            self._export_cancels = set()
+        self._export_cancels.add(cancel)
+        self.statusBar().showMessage(f"Exporting {len(snapshot):,} stations…")
+
+        def write_csv():
+            fd = temporary = None
+            try:
+                fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp",
+                                                 dir=str(destination.parent))
+                with os.fdopen(fd, "w", newline="", encoding="utf-8") as stream:
+                    fd = None
+                    writer = csv.writer(stream)
+                    writer.writerow([heading for _key, heading in cols])
+                    for row in snapshot:
+                        if cancel.is_set():
+                            raise CancelledError("CSV export cancelled")
+                        writer.writerow([csv_cell(row.get(key, ""), secret_snapshot) for key, _heading in cols])
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if cancel.is_set():
+                    raise CancelledError("CSV export cancelled")
+                os.replace(temporary, destination)
+                temporary = None
+                return len(snapshot)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+
+        def finished(result):
+            self._export_cancels.discard(cancel)
+            if self._closing:
+                return
+            if isinstance(result, BaseException):
+                if not isinstance(result, CancelledError):
+                    self._status_error(f"Export failed: {self.config.redact(result)}")
+                return
+            self.statusBar().showMessage(f"Exported {int(result):,} station(s) → {destination}")
+
+        run_io(write_csv, finished, cancelled=cancel)
 
     def _import_favourites(self) -> None:
-        """Right-click Favorites → Import a CSV and MERGE it in (URLs already saved are
-        skipped — no clobber). Sanity-checks the file: it must have a URL column, and each
-        row needs a real URL (scheme://…); malformed rows are counted and ignored."""
         import csv
+        from pathlib import Path
         from PySide6.QtWidgets import QFileDialog
-
         from ..plugins.base import make_row
-        path, _ = QFileDialog.getOpenFileName(self, "Import to Favorites", "",
-                                              "CSV files (*.csv);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Import to Favorites", "", "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        ch = self.host.channels.get("bookmarks")
-        parsed: list[dict] = []
-        skipped = bad = 0
-        try:
-            from pathlib import Path
+        if hasattr(self, "_import_cancel"):
+            self._import_cancel.set()
+        cancel = threading.Event()
+        self._import_cancel = cancel
+        bm = self.host.channels["bookmarks"]
+        self._list_message("Reading station file…")
+        def read():
             if Path(path).stat().st_size > MAX_IMPORT_BYTES:
                 raise ValueError("CSV exceeds the import size limit")
-            with open(path, newline="", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f)
-                headers = {(h or "").strip().lower() for h in (reader.fieldnames or [])}
-                if "url" not in headers:                # not one of our exports / wrong format
-                    self.statusBar().showMessage(
-                        "Import failed: that CSV has no 'URL' column. Export a list first to "
-                        "see the format (URL required; Title, Genre, … optional).")
-                    return
-                for index, d in enumerate(reader):
+            parsed, bad = [], 0
+            with open(path, newline="", encoding="utf-8-sig") as stream:
+                reader = csv.DictReader(stream)
+                if "url" not in {(h or "").strip().lower() for h in reader.fieldnames or []}:
+                    raise ValueError("The CSV needs a URL column")
+                for index, values in enumerate(reader):
+                    if cancel.is_set():
+                        return None
                     if index >= MAX_ROWS:
                         raise ValueError("CSV has too many rows")
-                    row = {(k or "").strip().lower(): (v or "").strip()
-                           for k, v in d.items() if k}  # ignore ragged / extra columns
-                    url = row.get("url", "")
-                    if not valid_url(url, token=True):  # must look like a real stream URL
+                    row = {(key or "").strip().lower(): (value or "").strip()
+                           for key, value in values.items() if key and isinstance(value, str)}
+                    if not valid_url(row.get("url"), token=True):
                         bad += 1
                         continue
-                    if ch.is_favourite(url):
-                        skipped += 1
-                        continue
-                    br = row.get("bitrate", "")
-                    parsed.append(make_row(
-                        title=row.get("title") or url, url=url, genre=row.get("genre", ""),
-                        country=row.get("country", ""), homepage=row.get("homepage", ""),
-                        bitrate=int(br) if br.isdigit() else 0, format=row.get("format", ""),
-                    ))
-        except (OSError, csv.Error, UnicodeDecodeError, ValueError) as e:
-            self.statusBar().showMessage(f"Import failed: {e}")
-            return
-        added = ch.add_many(parsed)
-        self._cache.pop(("bookmarks", "Favorites"), None)    # favourites changed -> drop stale cache
-        if self.current_channel == "bookmarks" and self.current_category == "Favorites":
-            self._on_category(self.categories.currentItem(), None)
-        parts = [f"imported {added}"]
-        if skipped:
-            parts.append(f"skipped {skipped} already saved")
-        if bad:
-            parts.append(f"ignored {bad} with no/invalid URL")
-        self.statusBar().showMessage("Favorites: " + ", ".join(parts) + ".")
+                    bitrate = row.get("bitrate", "")
+                    parsed.append(make_row(title=row.get("title") or row["url"], url=row["url"],
+                                           genre=row.get("genre", ""), country=row.get("country", ""),
+                                           homepage=row.get("homepage", ""),
+                                           bitrate=int(bitrate) if bitrate.isdigit() else 0,
+                                           format=row.get("format", "")))
+            return parsed, bad, bm.prepare_import(parsed, [])
+        def done(result, attempts=0):
+            if self._closing or cancel.is_set():
+                return
+            if isinstance(result, BaseException):
+                self._status_error(self.config.redact(result))
+                return
+            if result is None:
+                return
+            rows, bad, plan = result
+            if not bm.plan_is_current(plan):
+                if attempts >= 4:
+                    self._status_error("Favorites changed during import; retry when editing is finished")
+                    return
+                run_io(lambda: (rows, bad, bm.prepare_import(rows, [])),
+                       lambda outcome: done(outcome, attempts + 1), cancelled=cancel)
+                return
+            try:
+                if not bm.apply_import_plan(plan):
+                    self._status_error("Favorites changed during import; retry")
+                    return
+                added = plan.favorites_added
+            except (ValueError, OSError) as exc:
+                self._status_error(self.config.redact(exc))
+                return
+            self._cache.pop(("bookmarks", "Favorites"), None)
+            if (self.current_channel, self.current_category) == ("bookmarks", "Favorites"):
+                self._on_category(self.categories.currentItem(), None)
+            self._list_message(f"Imported {added:,} favorites; {bad:,} invalid rows skipped")
+        run_io(read, done, cancelled=cancel)
+
 
     def _refresh_favicon(self, cid: str) -> None:
         for p in self.config.icon_dir.glob(f"chan_{cid}.*"):
@@ -711,7 +839,7 @@ class MainWindow(QMainWindow):
 
     # ---- station favicons (artwork in the list; small lists only) ----
     def _station_icon(self, row):
-        if not self._station_favicons:               # icon mode "off" -> always the service logo
+        if self._icons_clearing or not self._station_favicons:  # no new icon work during a clear
             return self._service_icon_for(row)
         from PySide6.QtGui import QIcon
         fav = row.get("favicon")
@@ -719,7 +847,11 @@ class MainWindow(QMainWindow):
             if fav in self._station_icons:
                 ic = self._station_icons[fav]
                 if isinstance(ic, QIcon):
-                    return ic                        # already loaded
+                    self._station_icons.move_to_end(fav)
+                    return ic
+                if time.monotonic() >= self._icon_retry_at.get(("station", fav), float("inf")):
+                    self._station_icons.pop(fav, None)
+                    self._request_station_icon(fav)
             else:
                 self._request_station_icon(fav)      # lazy: fetch on first paint (visible rows only)
         else:                                        # no directory favicon -> derive from the stream (if enabled)
@@ -728,7 +860,11 @@ class MainWindow(QMainWindow):
                 if url in self._derived_icons:
                     ic = self._derived_icons[url]
                     if isinstance(ic, QIcon):
+                        self._derived_icons.move_to_end(url)
                         return ic
+                    if time.monotonic() >= self._icon_retry_at.get(("derived", url), float("inf")):
+                        self._derived_icons.pop(url, None)
+                        self._request_derived_icon(row)
                 else:
                     self._request_derived_icon(row)
         return self._service_icon_for(row)           # service logo until a per-station icon arrives
@@ -764,18 +900,27 @@ class MainWindow(QMainWindow):
         """Fetch one station's favicon (disk-cached -> once-only) and repaint when it arrives."""
         self._station_icons[url] = None              # mark in-flight (don't refetch / retry)
         from ..favicons import station_favicon
+        self._trim_icons(self._station_icons)
+        epoch = self._icon_epoch
         run_io(lambda: station_favicon(self.config, url),
-               lambda path, u=url: self._on_station_favicon(u, path))
+               lambda path: self._on_station_favicon(url, path, epoch), cancelled=self._icon_cancel)
 
-    def _on_station_favicon(self, url, path) -> None:
-        if self._closing:
+    def _on_station_favicon(self, url, path, epoch=None) -> None:
+        if self._closing or epoch is not None and epoch != self._icon_epoch:
             return
         if isinstance(path, str) and path:
             from PySide6.QtGui import QIcon
             ic = QIcon(path)
             if not ic.isNull():
                 self._station_icons[url] = ic
+                self._trim_icons(self._station_icons)
+                self._icon_retry_at.pop(("station", url), None)
                 self._icon_refresh.start(150)        # debounce: one repaint per burst of loads
+
+                return
+        self._station_icons.pop(url, None)
+        self._station_icons[url] = "retry"
+        self._icon_failed("station", url, path)
 
     def _request_derived_icon(self, row) -> None:
         """For a station with no directory favicon (SHOUTcast/TuneIn), derive its broadcaster logo
@@ -784,20 +929,25 @@ class MainWindow(QMainWindow):
         url = row.get("url")
         self._derived_icons[url] = None              # in-flight (don't re-request)
         from ..favicons import best_station_icon
+        self._trim_icons(self._derived_icons)
+        epoch = self._icon_epoch
         run_io(lambda r=dict(row): best_station_icon(self.config, r),
-               lambda path, u=url: self._on_derived_icon(u, path))
+               lambda path: self._on_derived_icon(url, path, epoch), cancelled=self._icon_cancel)
 
-    def _on_derived_icon(self, url, path) -> None:
-        if self._closing:
+    def _on_derived_icon(self, url, path, epoch=None) -> None:
+        if self._closing or epoch is not None and epoch != self._icon_epoch:
             return
         if isinstance(path, str) and path:
             from PySide6.QtGui import QIcon
             ic = QIcon(path)
             if not ic.isNull():
                 self._derived_icons[url] = ic
+                self._trim_icons(self._derived_icons)
+                self._icon_retry_at.pop(("derived", url), None)
                 self._icon_refresh.start(150)        # debounce: one repaint per burst
                 return
-        self._derived_icons[url] = "miss"            # no logo found -> service logo, don't refetch
+        self._derived_icons[url] = "miss"
+        self._icon_failed("derived", url, path)
 
     def _flush_icon_refresh(self) -> None:
         self.model.refresh_icons()
@@ -806,6 +956,8 @@ class MainWindow(QMainWindow):
     def _on_channel(self, cur, _prev) -> None:
         if not cur or not cur.data(Qt.UserRole):
             return
+        self._reset_load()
+        self._cancel_pending_icons()
         self._channel_gen += 1
         self._load_gen += 1
         self._loading_key = None
@@ -821,6 +973,8 @@ class MainWindow(QMainWindow):
         cached = self._cat_cache.get(cid)
         if cached:
             self._fill_categories(cid, cached)
+            if time.monotonic() - self._cat_ages.get(cid, 0) > self._CACHE_STALE_S:
+                self._fetch_categories(cid, generation, self.current_category)
         elif cid in self.INTERNAL_CHANNELS:
             self._fetch_categories(cid, generation)
         else:
@@ -833,14 +987,20 @@ class MainWindow(QMainWindow):
             return
         if isinstance(cached, tuple) and cached[0]:
             self._cat_cache[cid] = cached[0]
+            self._cat_ages[cid] = time.monotonic() - cached[1]
             self._fill_categories(cid, cached[0])
+            if cached[1] > self._CACHE_STALE_S:
+                self._fetch_categories(cid, generation, self.current_category)
         else:
             self._fetch_categories(cid, generation)
 
     def _fetch_categories(self, cid, generation, preferred=None, fresh=False) -> None:
-        method = "refresh_categories" if fresh else "update_categories"
-        run_async(lambda: self.host.call(cid, method, timeout=45),
-                  lambda result: self._on_categories(cid, result, generation, preferred, fresh))
+        operation = "refresh_categories" if fresh else "update_categories"
+        cancel = self._load_cancel
+        run_async(lambda: self.host.call(cid, operation, timeout=45, cancel_event=cancel),
+                  lambda result: self._on_categories(cid, result, generation, preferred, fresh),
+                  cancelled=cancel)
+
 
     def _on_categories(self, cid: str, result, generation=None, preferred=None, fresh=False) -> None:
         if self._closing or cid != self.current_channel:
@@ -850,14 +1010,22 @@ class MainWindow(QMainWindow):
         self._refresh_dot(cid)
         if isinstance(result, Result) and result.ok and result.data:
             cats = list(result.data)
+            unchanged = cats == self._cat_cache.get(cid) and self.categories.count() > 0
             self._cat_cache[cid] = cats
+            self._cat_ages[cid] = time.monotonic()
             if cid not in self.INTERNAL_CHANNELS:
-                run_cache(lambda: self.config.cache_save(cid, "__categories__", cats), lambda *_: None)
-            self._fill_categories(cid, cats, preferred=preferred, fresh=fresh)
+                cancel = self._cache_event(cid)
+                run_cache(lambda: self.config.cache_save(cid, "__categories__", cats), lambda *_: None,
+                          key=(cid, "__categories__"), cancelled=cancel)
+            if not unchanged or fresh:
+                self._fill_categories(cid, cats, preferred=preferred, fresh=fresh)
         else:
-            self.categories.clear()
+            self._refreshing = False
             msg = result.message if isinstance(result, Result) else str(result)
-            self._status_error(f"{cid}: {msg or 'No categories returned'}")
+            self._list_message(f"Showing saved stations — {cid}: {msg or 'No categories returned'}"
+                               if self.model.rowCount() else f"Unable to load {cid}: {msg or 'No categories returned'}")
+            self._retry_button.show()
+            self._cancel_button.hide()
 
     def _fill_categories(self, cid: str, cats: list, preferred=None, fresh=False) -> None:
         ch = self.host.channels.get(cid)
@@ -882,7 +1050,9 @@ class MainWindow(QMainWindow):
     def _on_category(self, cur, _prev, fresh=False) -> None:
         if self._closing or not cur or cur.text() == "Loading…":
             return
+        self._reset_load()
         self._view_search = False
+        self._back_button.hide()
         self._search_query = None
         self.search.clear()
         self.current_category = cur.text()
@@ -894,10 +1064,13 @@ class MainWindow(QMainWindow):
         if cat == getattr(self.host.channels.get(cid), "listeners_category", ""):
             self._show_listeners(cid, gen)
             return
-        cached = None if fresh else self._cache.get((cid, cat))
+        cached = None if fresh or cid in self.INTERNAL_CHANNELS else self._cache.get((cid, cat))
         if cached is not None:
             self._show_cached_rows(cid, cat, cached)
+            if self._cache.age((cid, cat)) > self._CACHE_STALE_S:
+                self._bg_refresh(cid, cat)
         elif fresh or cid in self.INTERNAL_CHANNELS:
+            self._retain_during_load = bool(fresh and self._refresh_view_key == (cid, cat) and self.model.rowCount())
             self._begin_load(cid, cat, gen)
         else:
             self.model.set_rows([])
@@ -910,7 +1083,7 @@ class MainWindow(QMainWindow):
             return
         if isinstance(disk, tuple):
             cached, age = disk
-            self._cache[(cid, cat)] = cached
+            self._cache.put((cid, cat), cached, age=age)
             self._update_cache_label()
             self._show_cached_rows(cid, cat, cached)
             if age > self._CACHE_STALE_S:
@@ -920,16 +1093,25 @@ class MainWindow(QMainWindow):
 
     def _show_cached_rows(self, cid, cat, cached) -> None:
         rows = self._union(cid) if self._is_all(cid, cat) else cached
-        self.model.set_rows(rows)
+        self.model.set_rows(rows, validated=True)
         self._apply_column_visibility()
         self._load_station_favicons()
-        self.statusBar().showMessage(f"Loaded {len(rows)} stations (cached)")
+        self._list_message(f"Loaded {len(rows):,} saved stations")
 
     def _begin_load(self, cid, cat, gen) -> None:
-        self.model.set_rows([])
-        self.statusBar().showMessage(f"Loading {cat}…")
+        self._load_started = False
+        self._load_complete = True
+        self._load_errors = []
+        self._fresh_rows = []
+        self._fresh_seen = set()
+        self._pending_restore = self._view_position() if self._retain_during_load else None
+        if not self._retain_during_load:
+            self.model.set_rows([])
+        self._list_message(f"Refreshing {cat} — showing saved stations" if self._retain_during_load
+                           else f"Loading {cat}…")
         first = getattr(self.host.channels.get(cid), "page_size", None) or self.ALL_LIMIT
         self._load_page(cid, cat, 0, first, gen)
+
 
     def _apply_default_sort(self) -> None:
         """Apply the current channel's default table sort (Shoutcast → by listeners, descending),
@@ -968,125 +1150,138 @@ class MainWindow(QMainWindow):
 
     def _load_page(self, cid, cat, offset, limit, gen) -> None:
         self._loading_key = (cid, cat)
-        search = self._search_query
-        tmo = 240 if self._is_all(cid, cat) else 45    # the ALL sweep (Shoutcast 313 genres) needs longer
+        self._cancel_button.show()
+        search, cancel = self._search_query, self._load_cancel
         run_async(
-            lambda: self.host.call(cid, "update_streams_page", cat, offset, limit, search, timeout=tmo),
-            lambda r: self._on_page(cid, cat, offset, gen, r),
-        )
+            lambda: self.host.call(cid, "update_streams_page", cat, offset, limit, search,
+                                   timeout=45, cancel_event=cancel),
+            lambda result: self._on_page(cid, cat, offset, gen, result), cancelled=cancel)
+
 
     def _on_page(self, cid, cat, offset, gen, result) -> None:
-        if self._closing:
+        if self._closing or gen != self._load_gen or cid != self.current_channel:
             return
-        if gen != self._load_gen or cid != self.current_channel:
-            return                    # user moved on; ignore this stale page
         self._refresh_dot(cid)
         ch = self.host.channels.get(cid)
         if not (isinstance(result, Result) and result.ok):
             retry = (gen, offset)
             if offset and retry not in self._page_retries and self.host.is_enabled(cid):
                 self._page_retries.add(retry)
-                self.statusBar().showMessage(f"Loaded {self.model.rowCount():,} stations; retrying the next batch…")
+                self._list_message(f"Loaded {self.model.rowCount():,} stations; retrying next batch…")
                 def again():
-                    if not self._closing and gen == self._load_gen and cid == self.current_channel:
-                        batch = getattr(ch, "page_batch_size", None) or self.ALL_LIMIT
-                        self._load_page(cid, cat, offset, batch, gen)
+                    if not self._closing and gen == self._load_gen and not self._load_cancel.is_set():
+                        self._load_page(cid, cat, offset,
+                                        getattr(ch, "page_batch_size", None) or self.ALL_LIMIT, gen)
                 QTimer.singleShot(1000, again)
                 return
             self._loading_key = None
-            if offset == 0:
-                self.model.set_rows([])
-            msg = result.message if isinstance(result, Result) else str(result)
-            self._status_error(f"{cid}: {msg}")
+            self._cancel_button.hide()
+            self._refreshing = False
+            self._load_complete = False
+            message = getattr(result, "message", str(result)) or "Request failed"
+            self._list_message(f"Refresh failed; saved stations retained. {self.config.redact(message)}"
+                               if self._retain_during_load else f"Incomplete list: {self.config.redact(message)}")
+            self._retry_button.show()
             return
         rows = result.data or []
-        if offset == 0:
-            self.model.set_rows(rows)        # keep the user's column widths/order
-        else:
-            new = rows
-            if self._is_all(cid, cat):       # ALL sweeps overlap across genres -> dedup as we go
-                have = {r.get("url") for r in self.model.rows()}
-                new = [r for r in rows if r.get("url") not in have]
-            self.model.append_rows(new)
-        total = self.model.rowCount()
-        self._apply_column_visibility()
-        # Shoutcast ★ All Stations pages in by genre-chunk — keep going while chunks return rows
-        if getattr(ch, "all_chunked", False) and self._is_all(cid, cat) and not self._view_search:
-            if rows:
-                self.statusBar().showMessage(f"Loaded {total:,} stations… loading more genres")
-                self._load_page(cid, cat, offset + 1, self.ALL_LIMIT, gen)
+        self._load_complete &= bool(getattr(result, "complete", True))
+        self._load_errors.extend(getattr(result, "errors", ()) or ())
+        if rows:
+            if self._retain_during_load:
+                for row in rows:
+                    if row['url'] not in self._fresh_seen and len(self._fresh_rows) < self.ALL_LIMIT:
+                        self._fresh_seen.add(row['url'])
+                        self._fresh_rows.append(row)
+                self._load_started = True
+            elif offset == 0:
+                self.model.set_rows(rows, validated=True)
+                self._load_started = True
             else:
-                self._finish_load(cid, cat, ch)
-            return
-        psize = getattr(ch, "page_size", None)
-        requested = psize if offset == 0 else getattr(ch, "page_batch_size", psize)
-        # Validation can remove unusable rows from a full API page. Advance by the
-        # requested page span, not the surviving row count, and stop on an empty page.
-        if requested and rows and offset + requested < self.ALL_LIMIT:
-            self.statusBar().showMessage(f"Loaded {total:,} stations… loading more")
-            batch = getattr(ch, "page_batch_size", psize)
-            self._load_page(cid, cat, offset + requested, batch, gen)
+                remaining = self.ALL_LIMIT - self.model.rowCount()
+                self.model.append_rows(rows[:max(0, remaining)], validated=True)
+                if len(rows) > remaining:
+                    self._load_complete = False
+                    self._load_errors.append("Display limit reached; narrow the category or search")
+                self._load_started = True
+            self._apply_column_visibility()
+            self._restore_view_position(self._pending_restore)
+        more, next_offset = self._page_continuation(ch, cat, offset, result)
+        loaded_count = len(self._fresh_rows) if self._retain_during_load else self.model.rowCount()
+        if more and loaded_count < self.ALL_LIMIT:
+            self._list_message(f"Refreshing: {loaded_count:,} stations received; showing saved stations"
+                               if self._retain_during_load else f"Loaded {loaded_count:,} stations… loading more")
+            self._load_page(cid, cat, next_offset,
+                            getattr(ch, "page_batch_size", None) or getattr(ch, "page_size", None) or self.ALL_LIMIT, gen)
         else:
+            if more:
+                self._load_complete = False
+            if not self._load_started and self._retain_during_load and self._load_complete:
+                self.model.set_rows([])
             self._finish_load(cid, cat, ch)
 
-    def _finish_load(self, cid: str, cat: str, ch) -> None:
-        """Loading complete -> cache the rows. For ALL, fold in any separately-browsed
-        categories (the unified cache) — but only rebuild the list if that actually ADDS rows,
-        so a big ALL doesn't pointlessly reset/scroll at the very end."""
+
+    def _finish_load(self, cid, cat, ch) -> None:
         self._loading_key = None
-        rows = self.model.rows()
+        self._cancel_button.hide()
+        self._refreshing = False
+        complete = self._load_complete and not self._load_errors
+        rows = list(self._fresh_rows) if self._retain_during_load else self.model.rows()
+        if self._retain_during_load and complete:
+            self._replace_rows(rows, validated=True)
         if self._view_search:
-            self.statusBar().showMessage(f"{len(rows):,} result(s) — {ch.title}: “{self._search_query}”")
-            self._load_station_favicons()
-            return  # search results must never replace the category cache
-        self._cache[(cid, cat)] = rows
-        if cid not in self.INTERNAL_CHANNELS:        # don't persist live/local lists (Favorites, Local)
-            run_cache(lambda r=list(rows): self.config.cache_save(cid, cat, r), lambda *_: None)  # async
-        if self._is_all(cid, cat):
-            union = self._union(cid)
-            if len(union) > self.model.rowCount():
-                self.model.set_rows(union)
-                self._apply_column_visibility()
+            self._list_message(f"{len(rows):,} results — {ch.title}: “{self._search_query}”"
+                               + (" (partial; retry available)" if not complete else ""))
+        elif complete:
+            if cid not in self.INTERNAL_CHANNELS:
+                self._cache[(cid, cat)] = rows
+                self._save_catalog(cid, cat, rows)
+            self._list_message(f"Loaded {len(rows):,} stations from {ch.title}" if rows else self._empty_message(cid, cat))
+        else:
+            detail = self.config.redact("; ".join(self._load_errors[:3]))
+            self._list_message(f"Partial list: {len(rows):,} stations. Saved complete list retained. {detail}")
+        self._retry_button.setVisible(not complete)
+        self._retain_during_load = False
+        self._fresh_rows = []
+        self._fresh_seen = set()
+        self._pending_restore = None
         self._update_cache_label()
         self._load_station_favicons()
-        total = self.model.rowCount()
-        self.statusBar().showMessage(
-            "No stations found" if total == 0 else f"Loaded {total:,} stations from {ch.title}")
-        if cat == getattr(ch, "all_category", "") and \
-                self.current_category == getattr(ch, "listeners_category", ""):
-            self._render_listeners(cid)      # loaded All for the "★ With Listeners" view -> filter it
+        if cat == getattr(ch, "all_category", "") and self.current_category == getattr(ch, "listeners_category", ""):
+            self._render_listeners(cid)
+
 
     def _is_all(self, cid: str, cat: str) -> bool:
         """Is `cat` this channel's 'everything' category (its view = the union pool)?"""
         ch = self.host.channels.get(cid)
         return bool(getattr(ch, "all_category", None)) and cat == ch.all_category
 
-    def _union(self, cid: str) -> list:
-        """Every station cached for this channel, deduped by URL — so the ALL view is the
-        sweep PLUS every category you've browsed (the unified cache)."""
-        seen: dict = {}
-        for (c, _cat), rows in self._cache.items():
-            if c == cid:
-                for r in rows:
-                    u = r.get("url")
-                    if u and u not in seen:
-                        seen[u] = r
+    def _union(self, cid):
+        """A fresh complete All snapshot supersedes older category snapshots."""
+        channel = self.host.channels.get(cid)
+        all_key = (cid, getattr(channel, "all_category", None))
+        cutoff = self._cache.timestamp(all_key)
+        snapshots = [(self._cache.timestamp(key), values) for key, values in self._cache.items()
+                     if key[0] == cid and self._cache.timestamp(key) >= cutoff]
+        seen = {}
+        for _stamp, values in sorted(snapshots, key=lambda item: item[0]):
+            for row in values:
+                if row.get("url"):
+                    seen[row["url"]] = row
         return list(seen.values())
 
     def _apply_column_visibility(self) -> None:
-        """Hide columns the current rows never fill — show only what this service uses
-        (Station always stays visible). Re-run after each load."""
-        rows = self.model.rows()
-        if not rows:
+        if not self.model.rowCount():
             return
         for col, (_label, field) in enumerate(COLUMNS):
-            if field == "title":
-                self.table.setColumnHidden(col, False)
-                continue
-            used = any(r.get(field) not in (None, "", 0) for r in rows)
-            self.table.setColumnHidden(col, not used)
+            preferred = self.config.get("visible_columns", [])
+            visible = self.model.has_field(field)
+            if field == "url" and not preferred:
+                visible = False
+            if preferred:
+                visible = visible and (field == "title" or field in preferred)
+            self.table.setColumnHidden(col, not visible)
 
-    # ---- playback ----
+
     def _selected_row(self) -> dict | None:
         idx = self.table.currentIndex()
         if not idx.isValid():
@@ -1180,19 +1375,32 @@ class MainWindow(QMainWindow):
 
     def _play_selected(self, *_a) -> None:
         row = self._selected_row()
-        if not row:
+        if row:
+            self._play_row(row)
+
+    def _play_row(self, row) -> None:
+        row = station_row(row)
+        if row is None:
+            self._status_error("Unsupported station URL")
             return
+        self._play_cancel.set()
+        self._play_cancel = threading.Event()
+        cancel = self._play_cancel
         self._play_gen += 1
+        self._pending_play = True
+        self.btn_play.setChecked(True)
+        self.act_stop.setEnabled(True)
         generation = self._play_gen
         src = self._resolve_source(row)
+        row.setdefault("_source", src)
         ch = self.host.channels.get(src)
         if ch is not None and getattr(ch, "needs_resolve", False):
-            # row from a channel that needs URL resolution (e.g. TuneIn) — incl. favourites
-            self.statusBar().showMessage(f"Resolving {row['title']}…")
-            run_async(lambda: self.host.call(src, "resolve_url", row),
-                      lambda res, g=generation: self._start_playback(row, res, g))
+            self.np_label.setText(f"Resolving {row['title']}…")
+            run_playback(lambda: self.host.call(src, "resolve_url", row, cancel_event=cancel, playback=True),
+                         lambda res: self._start_playback(row, res, generation), cancelled=cancel)
         else:
             self._start_playback(row, None, generation)
+
 
     def _resolve_source(self, row: dict) -> str:
         """Which channel resolves this row's URL: its origin if known (favourites/history
@@ -1209,6 +1417,7 @@ class MainWindow(QMainWindow):
     def _start_playback(self, row: dict, resolved, generation=None) -> None:
         if self._closing or (generation is not None and generation != self._play_gen):
             return
+        self._pending_play = False
         row = station_row(row)
         if row is None:
             self._status_error("Unsupported or invalid station URL")
@@ -1216,6 +1425,8 @@ class MainWindow(QMainWindow):
         if resolved is not None:
             if not isinstance(resolved, Result) or not resolved.ok or not isinstance(resolved.data, dict):
                 self._status_error(self.config.redact(getattr(resolved, "message", "Unable to resolve station")))
+                self.btn_play.setChecked(bool(self.player.is_playing))
+                self.np_label.setText(self._np_full if self.player.is_playing else "Connection failed")
                 return
             url = resolved.data.get("url")
         else:
@@ -1241,9 +1452,17 @@ class MainWindow(QMainWindow):
         if bm:
             hist = dict(row)
             hist.setdefault("_source", self._resolve_source(row))
-            bm.add_history(hist)
+            try:
+                bm.add_history(hist)
+            except (ValueError, OSError) as exc:
+                self._status_error(self.config.redact(exc))
+            self._cache.pop(("bookmarks", "History"), None)
+            if self.current_channel == "bookmarks" and self.current_category == "History":
+                self._replace_rows(bm.update_streams("History"))
         self.act_fav.setChecked(bool(bm and bm.is_favourite(row["url"])))
-        self.statusBar().showMessage(f"Playing {row['title']}")
+        self.np_label.setText(f"Connecting — {row['title']}")
+        self.statusBar().showMessage(f"Connecting to {row['title']}")
+        self._sync_visualizer()
         self._last_notified_title = ""
         self._notify(row["title"], row.get("genre") or row.get("description") or "Now playing", row)
         self._discord_update(row["title"], row.get("genre") or "Internet radio", reset=True)
@@ -1274,6 +1493,8 @@ class MainWindow(QMainWindow):
 
     def _stop(self, *_a) -> None:
         self._play_gen += 1
+        self._play_cancel.set()
+        self._pending_play = False
         self.player.stop()
         self._playing_row_url = ""
         self.btn_play.setChecked(False)
@@ -1285,6 +1506,7 @@ class MainWindow(QMainWindow):
         self._playing_row = None
         self._update_art()
         self.statusBar().showMessage("Stopped")
+        self._sync_visualizer()
 
     def _toggle_favourite(self, *_a) -> None:
         row = self._selected_row()
@@ -1293,7 +1515,11 @@ class MainWindow(QMainWindow):
             return
         row = dict(row)
         row.setdefault("_source", self.current_channel)   # remember origin (for resolving on play)
-        now = bm.toggle(row)
+        try:
+            now = bm.toggle(row)
+        except (OSError, ValueError) as exc:
+            self._status_error(self.config.redact(exc))
+            return
         self.act_fav.setChecked(now)
         self._cache.pop(("bookmarks", "Favorites"), None)   # the favourites list changed -> stale cache
         if self.current_channel == "bookmarks" and self.current_category == "Favorites" and not now:
@@ -1347,6 +1573,8 @@ class MainWindow(QMainWindow):
         return QIcon(sp) if (sp is not None and not sp.isNull()) else self.windowIcon()
 
     def _on_nowplaying(self, title: str) -> None:
+        if self._closing or not self._playing_row or not self.player.is_playing:
+            return
         title = self.config.redact(title)
         if title:
             self._np_full = title
@@ -1588,83 +1816,116 @@ class MainWindow(QMainWindow):
             self._reload(preferred=item.text())
 
     def _clear_channel_cache(self, cid) -> None:
-        self._cache_epoch[cid] = self._cache_epoch.get(cid, 0) + 1
-        for key in [key for key in self._cache if key[0] == cid]:
-            self._cache.pop(key, None)
+        self._invalidate_source(cid)
+        for key in list(self._cache):
+            if key[0] == cid:
+                self._cache.pop(key, None)
         self._cat_cache.pop(cid, None)
         run_cache(lambda: self.config.cache_clear_channel(cid), lambda *_: None)
         self._update_cache_label()
+
 
     def _reload(self, *_a, preferred=None) -> None:
         cid = self.current_channel
         if not cid:
             return
-        selected = preferred or self.current_category
         if self.host.health[cid].auto_disabled:
-            self.host.set_enabled(cid, True)  # an explicit retry re-arms a failed service
+            self.host.set_enabled(cid, True)
+        selected = preferred or self.current_category
+        self._refresh_view_key = (cid, selected)
+        self._reset_load()
+        self._invalidate_source(cid)
         self._channel_gen += 1
         self._load_gen += 1
-        self._loading_key = None
-        self._clear_channel_cache(cid)
-        self.categories.clear()
-        self.categories.addItem("Loading…")
-        self.statusBar().showMessage(f"Refreshing {self.host.channels[cid].title}…")
+        self._refreshing = True
+        self._view_search = False
+        self._search_query = None
+        self._cache.mark_stale(cid)
+        self._list_message(f"Refreshing {self.host.channels[cid].title} — saved stations remain available")
         self._fetch_categories(cid, self._channel_gen, selected, fresh=True)
 
-    def _refresh_channel_cache(self, cid: str) -> None:
+
+    def _refresh_channel_cache(self, cid) -> None:
         if self.current_channel == cid:
             self._reload()
         else:
-            self._clear_channel_cache(cid)
+            self._invalidate_source(cid)
+            self._cache.mark_stale(cid)
+            self._cat_ages[cid] = 0
+
 
     def _update_cache_label(self) -> None:
-        n = len(self._cache)
-        rows = sum(len(v) for v in self._cache.values())
-        self._cache_label.setText(f"Cache: {n} list(s) / {rows:,} stations" if n else "")
+        self._cache_label.setText("")
+        self._cache_label.setToolTip(f"{len(self._cache)} cached lists; {self._cache.row_count:,} rows")
 
-    # ---- background refresh (keeps the disk cache fresh, non-disruptively) ----
-    def _bg_refresh(self, cid: str, cat: str) -> None:
+
+    def _bg_refresh(self, cid, cat) -> None:
         if self._closing or cid in self.INTERNAL_CHANNELS or not cat:
             return
         key = (cid, cat)
         if key in self._bg_inflight or key == self._loading_key:
             return
         self._bg_inflight.add(key)
-        epoch = self._cache_epoch.get(cid, 0)
-        run_async(lambda: self.host.call(cid, "refresh_streams", cat, timeout=60),
-                  lambda res: self._apply_bg_refresh(key, res, epoch))
+        epoch, generation = self._cache_epoch.get(cid, 0), self._cache_generation
+        cancel = self._cache_event(cid)
+        ch = self.host.channels[cid]
+        def refresh():
+            categories = self.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel)
+            if not categories.ok:
+                return categories
+            rows, seen, errors = [], set(), []
+            offset, complete = 0, True
+            while not cancel.is_set():
+                limit = getattr(ch, "page_size", None) if offset == 0 else getattr(ch, "page_batch_size", None)
+                result = self.host.call(cid, "update_streams_page", cat, offset, limit or self.ALL_LIMIT, None,
+                                        timeout=45, cancel_event=cancel)
+                if not result.ok:
+                    return result
+                complete &= getattr(result, "complete", True)
+                errors.extend(getattr(result, "errors", ()) or ())
+                for row in result.data or []:
+                    if row["url"] not in seen:
+                        seen.add(row["url"])
+                        rows.append(row)
+                more, next_offset = self._page_continuation(ch, cat, offset, result)
+                if not more:
+                    return Result(Status.OK, data=rows, complete=complete, errors=tuple(errors))
+                if len(rows) >= self.ALL_LIMIT:
+                    return Result(Status.OK, data=rows[:self.ALL_LIMIT], complete=False,
+                                  errors=("Catalog limit reached",))
+                offset = next_offset
+            return Result(Status.ERROR, message="Refresh cancelled")
+        run_async(refresh, lambda result: self._apply_bg_refresh(key, result, epoch, generation),
+                  priority=10, cancelled=cancel)
 
-    def _apply_bg_refresh(self, key, res, epoch=None) -> None:
+
+    def _apply_bg_refresh(self, key, res, epoch=None, generation=None) -> None:
         self._bg_inflight.discard(key)
         cid, cat = key
-        if self._closing or (epoch is not None and epoch != self._cache_epoch.get(cid, 0)):
+        if (self._closing or epoch is not None and epoch != self._cache_epoch.get(cid, 0)
+                or generation is not None and generation != self._cache_generation):
             return
-        rows = getattr(res, "data", None)
-        if not (getattr(res, "ok", False) and rows):
+        if not (getattr(res, "ok", False) and getattr(res, "complete", True)
+                and not getattr(res, "errors", ())):
+            if (self.current_channel, self.current_category) == key:
+                self._list_message("Showing saved stations — refresh incomplete; use Retry")
+                self._retry_button.show()
             return
+        rows = res.data or []
         self._cache[key] = rows
-        run_cache(lambda r=list(rows): self.config.cache_save(cid, cat, r), lambda *_: None)
+        self._save_catalog(cid, cat, rows)
         self._update_cache_label()
-        if self.current_channel == cid and self.current_category == cat and key != self._loading_key and not self._view_search:
-            # Preserve selection and scroll position while replacing stale metadata.
-            index = self.table.currentIndex()
-            old = self.model.row_at(self.proxy.mapToSource(index).row()) if index.isValid() else None
-            scroll = self.table.verticalScrollBar().value()
-            self.model.set_rows(rows)
-            self._apply_column_visibility()
-            if old:
-                position = next((i for i, row in enumerate(rows) if row.get("url") == old.get("url")), None)
-                if position is not None:
-                    self.table.setCurrentIndex(self.proxy.mapFromSource(self.model.index(position, 0)))
-            self.table.verticalScrollBar().setValue(scroll)
-            self._load_station_favicons()
-            self.statusBar().showMessage(f"{cat}: refreshed ({len(rows):,} stations)")
+        if (self.current_channel, self.current_category) == key and key != self._loading_key and not self._view_search:
+            self._replace_rows(rows, validated=True)
+            self._list_message(f"{cat}: refreshed ({len(rows):,} stations)")
+
 
     def _periodic_refresh(self) -> None:
         cid, cat = self.current_channel, self.current_category
         derived = cat == getattr(self.host.channels.get(cid), "listeners_category", "")
-        if cid and cat and not self._view_search and not derived and not self._is_all(cid, cat):
+        if cid and cat and not self._view_search and not derived:
             self._bg_refresh(cid, cat)
+
 
     def _nudge_volume(self, delta: int) -> None:
         """Bump the app's OWN (mpv) volume — bound to the Volume keys + Ctrl+Up/Down, so when the
@@ -1728,6 +1989,11 @@ class MainWindow(QMainWindow):
         self.search.selectAll()
 
     def _update_stream_status(self) -> None:
+        self._sync_visualizer()
+        self._sync_selection_actions()
+        errors = self.config.take_write_errors() if hasattr(self.config, "take_write_errors") else []
+        if errors:
+            self._status_error("Data could not be saved: " + self.config.redact("; ".join(errors)))
         try:
             if self.player.is_playing:
                 title = self.player.now_playing()        # poll the live track (reliable)
@@ -1741,6 +2007,13 @@ class MainWindow(QMainWindow):
                     self._np_meta = meta
                     self._elide_np()                     # reflect it after the title in the bar too
                 buf = self.player.buffer_percent()
+                if self._playing_row:
+                    if isinstance(buf, (int, float)) and buf < 100:
+                        self.np_label.setText(f"Buffering — {self._np_full}")
+                    elif codec:
+                        self._elide_np()
+                    else:
+                        self.np_label.setText(f"Connecting — {self._np_full}")
                 bits = [b for b in (self._np_meta.strip(), f"buffer {buf}%" if buf is not None else "") if b]
                 self._stream_label.setText("▶ " + " · ".join(bits) if bits else "▶")
             else:
@@ -1813,7 +2086,7 @@ class MainWindow(QMainWindow):
 
     def _tick_viz(self) -> None:
         """Drive the active visualization from the live audio levels (~30 fps). Never crash."""
-        if self._viz == "off":
+        if not self._visualizer_active():
             return
         try:
             levels = self.player.audio_levels() if self.player.is_playing else None
@@ -1832,88 +2105,81 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 — a meter must never take down playback
             pass
 
-    def _on_search(self, text: str) -> None:
+    def _on_search(self, text) -> None:
         self._pending_filter = text
-        self._search_timer.start(220)        # debounce: filter once typing pauses
+        if self.search_scope.currentIndex() == 0:
+            self._search_timer.start(220)
+        elif not text and self._view_search:
+            QTimer.singleShot(0, self._back_to_category)
+
 
     def _apply_filter(self) -> None:
         text = self._pending_filter
         self.proxy.setFilterFixedString(text)
         total = self.model.rowCount()
-        if text and total:
-            self.statusBar().showMessage(
-                f"Showing {self.proxy.rowCount()} of {total}  (filter: {text})"
-            )
+        if text:
+            count = self.proxy.rowCount()
+            self._list_message(f"{count:,} of {total:,} stations" if count else "No matches in this list — clear the filter or search this source")
 
-    # ---- server-side directory search (Enter) ----
+
     def _search_enter(self) -> None:
-        q = self.search.text().strip()
-        if not q:
+        query = self.search.text().strip()
+        if not query:
             return
-        if self.btn_search_all.isChecked():
-            self._search_all_sources(q)
+        scope = self.search_scope.currentIndex()
+        if scope == 2:
+            self._search_all_sources(query)
+        elif scope == 1:
+            self._search_channel(self.current_channel, query)
         else:
-            self._search_channel(self.current_channel, q)
+            self._apply_filter()
 
-    def _search_channel(self, cid: str, q: str) -> None:
-        """Search ONE channel's whole directory (not just the loaded rows)."""
-        ch = self.host.channels.get(cid)
-        if not getattr(ch, "has_search", False):
-            self.statusBar().showMessage(
-                f"{ch.title if ch else 'This source'} has no directory search — filtering the loaded list")
-            return                                    # the type-to-filter result already stands
+
+    def _search_channel(self, cid, query) -> None:
+        channel = self.host.channels.get(cid)
+        if not getattr(channel, "has_search", False):
+            self._list_message("This service supports filtering its loaded list; choose Loaded list")
+            return
+        self._reset_load()
         self._load_gen += 1
         self._view_search = True
-        self._search_query = q
+        self._search_query = query
+        self._back_button.show()
         self._search_timer.stop()
         self.proxy.setFilterFixedString("")
         self.model.set_rows([])
-        self.statusBar().showMessage(f"Searching {ch.title} for “{q}”…")
-        cat = self.current_category or getattr(ch, "all_category", "") or ""
-        self._load_page(cid, cat, 0, getattr(ch, "page_size", None) or self.ALL_LIMIT, self._load_gen)
+        self._list_message(f"Searching {channel.title} for “{query}”…")
+        cat = self.current_category or getattr(channel, "all_category", "") or ""
+        self._load_page(cid, cat, 0, getattr(channel, "page_size", None) or self.ALL_LIMIT, self._load_gen)
 
-    def _search_all_sources(self, q: str) -> None:
-        """Fan the query out to every search-capable, enabled channel; merge + de-dup by URL."""
-        cands = [cid for cid, ch in self.host.channels.items()
-                 if getattr(ch, "has_search", False) and self.host.is_enabled(cid)]
-        if not cands:
-            self.statusBar().showMessage("No search-capable sources are enabled")
+
+    def _search_all_sources(self, query) -> None:
+        candidates = [cid for cid, ch in self.host.channels.items()
+                      if getattr(ch, "has_search", False) and self.host.is_enabled(cid)]
+        if not candidates:
+            self._list_message("No searchable services are enabled")
             return
+        self._reset_load()
         self._load_gen += 1
-        self._loading_key = None
         self._view_search = True
-        self._search_query = q
+        self._search_query = query
         self._search_timer.stop()
-        gen = self._load_gen
         self.proxy.setFilterFixedString("")
         self.model.set_rows([])
-        self._search_acc = {}                         # url -> row, deduped across sources
-        self._search_pending = set(cands)
-        self.statusBar().showMessage(f"Searching {len(cands)} sources for “{q}”…")
-        for cid in cands:
-            ch = self.host.channels.get(cid)
-            cat = getattr(ch, "all_category", "") or ""
-            run_async(lambda c=cid, k=cat: self.host.streams(c, k, search=q, timeout=45),
-                      lambda res, g=gen, c=cid: self._on_all_results(g, c, q, res))
+        self._search_acc = {}
+        self._search_pending = set(candidates)
+        self._search_failures = {}
+        self._search_done = set()
+        self._back_button.show()
+        self._cancel_button.show()
+        self._list_message(f"Searching {len(candidates)} services…")
+        for cid in candidates:
+            self._search_source_page(self._load_gen, cid, query, 0)
 
-    def _on_all_results(self, gen: int, cid: str, q: str, res) -> None:
-        if self._closing:
-            return
-        if gen != self._load_gen:
-            return
-        for r in (getattr(res, "data", None) or []):
-            url = r.get("url")
-            if url and url not in self._search_acc:
-                r = dict(r)
-                r.setdefault("_source", cid)
-                self._search_acc[url] = r
-        self._search_pending.discard(cid)
-        merged = list(self._search_acc.values())
-        self.model.set_rows(merged)                   # progressive: grows as each source answers
-        self._apply_column_visibility()
-        self._load_station_favicons()
-        tail = "" if not self._search_pending else " (searching…)"
-        self.statusBar().showMessage(f"{len(merged):,} result(s) across all sources — “{q}”{tail}")
+
+    def _on_all_results(self, gen, cid, query, result) -> None:
+        self._on_all_page(gen, cid, query, 0, result)
+
 
     def _open_website(self, url: str) -> None:
         if not valid_url(url, web=True):
@@ -1955,24 +2221,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Drop a .py plugin in: {d}")
 
     def _on_cache_cleared(self) -> None:
-        """Disk cache cleared from Options → Cache & Data: drop the in-memory cache + reload."""
+        if self._closing:
+            return
         self._cache.clear()
+        self._cat_cache.clear()
         self._reload()
+
 
     def _open_options(self) -> None:
         from .options import OptionsDialog
         dlg = OptionsDialog(self.host, self.config, self, self.config.get("theme", "dark"))
         dlg.changed.connect(self._on_plugins_changed)
+        dlg.visualization_changed.connect(self._set_visualization)
+        dlg.volume_changed.connect(self.vol.setValue)
+        dlg.album_art_changed.connect(self._toggle_art)
         dlg.settings_changed.connect(self._apply_general_settings)
         dlg.themes_reloaded.connect(self._rebuild_theme_menu)   # a theme was imported
         dlg.theme_changed.connect(self._set_theme)              # a theme was picked/applied
+        dlg.cache_clearing.connect(self._before_cache_clear)
+        dlg.icons_clearing.connect(self._before_icons_clear)
+        dlg.icons_cleared.connect(self._after_icons_clear)
         dlg.cache_cleared.connect(self._on_cache_cleared)       # disk cache cleared -> drop in-memory + reload
         dlg.data_imported.connect(self._on_cache_cleared)       # backup imported -> refresh favourites/local
+        dlg.wallpaper_dim_changed.connect(self._wallpaper_widget.set_dim)
         dlg.wallpaper_changed.connect(self._on_wallpaper_changed)
         dlg.font_changed.connect(lambda: self._apply_appearance(self.config.get("theme", "dark")))
         dlg.exec()
 
     def _apply_general_settings(self) -> None:
+        self._toggle_normalize(bool(self.config.get("normalize", False)))
         self._station_favicons = self.config.icon_mode() != "off"
         self._notifications = bool(self.config.get("notifications", True))
         self.model.refresh_icons()           # flip station icons <-> service logo immediately
@@ -2038,6 +2315,7 @@ class MainWindow(QMainWindow):
         try:
             self.config.set("window_geometry",
                             base64.b64encode(self.saveGeometry().data()).decode("ascii"))
+            self.config.set("pane_sizes", self._split.sizes())
             self.config.set("column_state",
                             base64.b64encode(self.table.horizontalHeader().saveState().data()).decode("ascii"))
             self.config.save_settings()
@@ -2054,6 +2332,9 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(QByteArray(base64.b64decode(geo)))
             except Exception:  # noqa: BLE001
                 pass
+        sizes = self.config.get("pane_sizes", [])
+        if isinstance(sizes, list) and len(sizes) == 3 and all(type(x) is int and x >= 0 for x in sizes):
+            self._split.setSizes(sizes)
         col = self.config.get("column_state")
         if col:
             try:   # Qt ignores it cleanly if the column count changed (old saved state)
@@ -2065,10 +2346,12 @@ class MainWindow(QMainWindow):
         """Tray left-click / Show-Hide: restore+raise if hidden or minimised, else hide."""
         if self.isVisible() and not self.isMinimized():
             self.hide()
+            self._sync_visualizer()
         else:
             self.showNormal()
             self.raise_()
             self.activateWindow()
+            self._sync_visualizer()
 
     def _quit(self) -> None:
         """Really exit (tray Quit / Ctrl+Q), bypassing close-to-tray."""
@@ -2096,6 +2379,301 @@ class MainWindow(QMainWindow):
             np.setText(label)
         tray.setToolTip(f"StreamTuner-ng — {label}" if label != "Stopped" else "StreamTuner-ng")
 
+    def _list_message(self, message):
+        self._list_notice.setText(self.config.redact(message))
+        self.statusBar().showMessage(self.config.redact(message))
+
+    def _empty_message(self, cid, cat):
+        if cid == "bookmarks" and cat == "Favorites":
+            return "No favorites yet — choose a station and click Favorite"
+        if cid == "bookmarks":
+            return "Your recently played stations will appear here"
+        if cid == "local":
+            return "Add a station with File → New Local Station"
+        return "No stations returned — try another category or Retry"
+
+    def _scope_changed(self, *_):
+        scope = self.search_scope.currentIndex()
+        self.search.setPlaceholderText("Filter loaded stations" if scope == 0 else "Search stations…")
+        self._search_submit_action.setVisible(scope != 0)
+        self.search_submit.setVisible(scope != 0)
+        if scope != 0:
+            self._search_timer.stop()
+            if hasattr(self, "proxy"):
+                self.proxy.setFilterFixedString("")
+        elif hasattr(self, "proxy"):
+            self._on_search(self.search.text())
+
+    def _back_to_category(self, *_):
+        if not self._view_search:
+            return
+        self._view_search = False
+        self._search_query = None
+        self._back_button.hide()
+        self._search_failures.clear()
+        self._on_category(self.categories.currentItem(), None)
+
+    def _search_source_page(self, gen, cid, query, offset):
+        ch = self.host.channels[cid]
+        category = getattr(ch, "all_category", "") or ""
+        limit = (getattr(ch, "page_size", None) if not offset else getattr(ch, "page_batch_size", None)) or self.ALL_LIMIT
+        cancel = self._load_cancel
+        run_async(lambda: self.host.call(cid, "update_streams_page", category, offset, limit, query,
+                                         timeout=45, cancel_event=cancel),
+                  lambda result: self._on_all_page(gen, cid, query, offset, result), cancelled=cancel)
+
+    def _on_all_page(self, gen, cid, query, offset, result):
+        if self._closing or gen != self._load_gen or self._load_cancel.is_set():
+            return
+        ch = self.host.channels[cid]
+        if not isinstance(result, Result) or not result.ok:
+            self._search_failures[cid] = self.config.redact(getattr(result, "message", str(result)))
+            self._search_pending.discard(cid)
+        else:
+            new = []
+            for row in result.data or []:
+                if len(self._search_acc) >= self.ALL_LIMIT:
+                    self._search_failures[cid] = "Result limit reached; refine the search"
+                    break
+                if row["url"] not in self._search_acc:
+                    row = dict(row)
+                    row.setdefault("_source", cid)
+                    self._search_acc[row["url"]] = row
+                    new.append(row)
+            self.model.append_rows(new, validated=True)
+            self._apply_column_visibility()
+            errors = getattr(result, "errors", ()) or ()
+            if errors or not getattr(result, "complete", True):
+                self._search_failures[cid] = self.config.redact("; ".join(errors) or "Partial results")
+            more, next_offset = self._page_continuation(ch, getattr(ch, "all_category", "") or "", offset, result)
+            if more and len(self._search_acc) < self.ALL_LIMIT:
+                self._search_source_page(gen, cid, query, next_offset)
+            else:
+                self._search_pending.discard(cid)
+                if more:
+                    self._search_failures[cid] = "Result limit reached; refine the search"
+        pending, failed = len(self._search_pending), len(self._search_failures)
+        text = f"{self.model.rowCount():,} results"
+        if pending:
+            text += f"; {pending} services searching…"
+        if failed:
+            names = ", ".join(self.host.channels[c].title for c in self._search_failures)
+            text += f"; {failed} services unavailable or partial: {names}"
+        elif not pending and not self.model.rowCount():
+            text = "No matching stations — try a different search"
+        self._list_message(text)
+        self._list_notice.setToolTip("\n".join(f"{self.host.channels[c].title}: {why}"
+                                              for c, why in self._search_failures.items()))
+        self._cancel_button.setVisible(bool(pending))
+        self._retry_button.setVisible(bool(failed) and not pending)
+
+    def _retry_failed_search(self, *_):
+        if self._view_search and getattr(self, "_search_pending", set()):
+            return
+        if self._view_search and self._search_failures:
+            failed = tuple(self._search_failures)
+            self._search_failures.clear()
+            self._search_pending = set(failed)
+            self._retry_button.hide()
+            self._cancel_button.show()
+            self._list_message(f"Retrying {len(failed)} services; keeping previous results…")
+            for cid in failed:
+                if self.host.health[cid].auto_disabled:
+                    self.host.set_enabled(cid, True)
+                self._search_source_page(self._load_gen, cid, self._search_query, 0)
+        elif self._view_search:
+            self._search_channel(self.current_channel, self._search_query)
+        else:
+            self._reload()
+
+    def _reset_load(self):
+        self._load_cancel.set()
+        self._load_cancel = threading.Event()
+        self._loading_key = None
+        self._page_retries.clear()
+        self._load_started = False
+        self._load_complete = True
+        self._load_errors = []
+        self._retain_during_load = False
+        self._fresh_rows = []
+        self._fresh_seen = set()
+        self._pending_restore = None
+        if hasattr(self, "_cancel_button"):
+            self._cancel_button.hide()
+            self._retry_button.hide()
+
+    def _cancel_load(self, *_):
+        self._load_cancel.set()
+        self._load_gen += 1
+        self._channel_gen += 1
+        self._loading_key = None
+        self._refreshing = False
+        self._cancel_button.hide()
+        self._list_message("Loading cancelled — displayed stations remain usable")
+
+    @staticmethod
+    def _page_continuation(channel, category, offset, result):
+        explicit = getattr(result, "has_more", None)
+        if explicit is not None:
+            next_offset = getattr(result, "next_offset", None)
+            if next_offset is None:
+                next_offset = offset + (getattr(channel, "page_batch_size", None)
+                                        or getattr(channel, "page_size", None) or 1)
+            return bool(explicit and next_offset > offset), next_offset
+        rows = result.data or []
+        if getattr(channel, "all_chunked", False) and category == getattr(channel, "all_category", None):
+            return bool(rows), offset + 1
+        size = getattr(channel, "page_size", None) if offset == 0 else (getattr(channel, "page_batch_size", None) or getattr(channel, "page_size", None))
+        return bool(rows and size and offset + size < MAX_ROWS), offset + (size or 1)
+
+    def _cache_event(self, cid):
+        return self._cache_events.setdefault(cid, threading.Event())
+
+    def _invalidate_source(self, cid):
+        self._cache_epoch[cid] = self._cache_epoch.get(cid, 0) + 1
+        self._cache_event(cid).set()
+        self._cache_events[cid] = threading.Event()
+        self._bg_inflight = {key for key in self._bg_inflight if key[0] != cid}
+
+    def _save_catalog(self, cid, cat, rows):
+        cancel = self._cache_event(cid)
+        run_cache(lambda snapshot=list(rows): self.config.cache_save(cid, cat, snapshot),
+                  lambda *_: None, key=(cid, cat), cancelled=cancel)
+
+    def _before_cache_clear(self):
+        if self._closing:
+            return
+        self._cache_generation += 1
+        self._reset_load()
+        self._load_gen += 1
+        self._channel_gen += 1
+        for cid in self.host.channels:
+            self._invalidate_source(cid)
+        self._cache.clear()
+        self._cat_cache.clear()
+
+    def _trim_icons(self, cache):
+        while len(cache) > 512:
+            cache.popitem(last=False)
+        while len(self._icon_retry_at) > 1024:
+            self._icon_retry_at.popitem(last=False)
+
+    def _icon_failed(self, kind, url, result):
+        delay = 2 if isinstance(result, BaseException) else 60
+        self._icon_retry_at[(kind, url)] = time.monotonic() + delay
+        self._trim_icons(self._station_icons)
+        self._trim_icons(self._derived_icons)
+        QTimer.singleShot(delay * 1000, self._retry_visible_icons)
+
+    def _retry_visible_icons(self):
+        if not self._closing:
+            self.table.viewport().update()
+
+    def _cancel_pending_icons(self):
+        self._icon_cancel.set()
+        self._icon_cancel = threading.Event()
+        self._icon_epoch += 1
+        for cache in (self._station_icons, self._derived_icons):
+            for key in [key for key, value in cache.items() if value is None]:
+                cache.pop(key, None)
+
+    def _before_icons_clear(self):
+        if self._closing:
+            return
+        self._icons_clearing = True
+        self._icon_cancel.set()
+        self._icon_cancel = threading.Event()
+        self._icon_epoch += 1
+        if hasattr(self.config, "invalidate_icons"):
+            self.config.invalidate_icons()
+        self._station_icons.clear()
+        self._derived_icons.clear()
+        self._icon_retry_at.clear()
+        self._favicons.clear()
+        self._svc_icons.clear()
+
+    def _after_icons_clear(self):
+        if self._closing:
+            return
+        self._icons_clearing = False
+        self._icon_epoch += 1
+        self._station_icons.clear()
+        self._derived_icons.clear()
+        self._load_channel_favicons()
+        self._update_art()
+        self.table.viewport().update()
+
+    def _set_column_visible(self, field, enabled):
+        current = self.config.get("visible_columns", [])
+        valid = {name for _label, name in COLUMNS}
+        chosen = {name for name in current if isinstance(name, str) and name in valid} if current else valid - {"url"}
+        if enabled:
+            chosen.add(field)
+        else:
+            chosen.discard(field)
+        chosen.add("title")
+        self.config.set("visible_columns", [name for _label, name in COLUMNS if name in chosen])
+        self.config.save_settings()
+        self._apply_column_visibility()
+
+    def _sync_selection_actions(self):
+        row = self._selected_row()
+        bm = self.host.channels.get("bookmarks")
+        self.act_fav.setEnabled(bool(row and bm))
+        self.act_fav.setChecked(bool(row and bm and bm.is_favourite(row["url"])))
+        self.act_play.setEnabled(bool(row))
+        self.act_stop.setEnabled(bool(self._pending_play or self.player.is_playing))
+
+    def _view_position(self):
+        row = self._selected_row()
+        return (row.get("url") if row else None, self.table.verticalScrollBar().value())
+
+    def _restore_view_position(self, position):
+        if not position:
+            return
+        url, scroll = position
+        index = self.model._positions.get(url)
+        if index is not None:
+            self.table.setCurrentIndex(self.proxy.mapFromSource(self.model.index(index, 0)))
+        self.table.verticalScrollBar().setValue(scroll)
+
+    def _replace_rows(self, rows, *, validated=False):
+        position = self._view_position()
+        self.model.set_rows(rows, validated=validated)
+        self._apply_column_visibility()
+        self._restore_view_position(position)
+
+    def _visualizer_active(self):
+        return (self._viz != "off" and self.isVisible() and not self.isMinimized()
+                and bool(self.player.is_playing) and not self._closing)
+
+    def _sync_visualizer(self):
+        active = self._visualizer_active()
+        if active and not self._vu_timer.isActive():
+            self._vu_timer.start(33)
+        elif not active and self._vu_timer.isActive():
+            self._vu_timer.stop()
+            self.vu.idle()
+            self.spectro.idle()
+        if hasattr(self.player, "enable_meter") and getattr(self, "_meter_active", None) != active:
+            self.player.enable_meter(active)
+            self._meter_active = active
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_vu_timer"):
+            self._sync_visualizer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "_vu_timer"):
+            self._sync_visualizer()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, "_vu_timer"):
+            self._sync_visualizer()
+
     def closeEvent(self, e):
         tray = getattr(self, "_tray", None)
         if (not getattr(self, "_really_quit", False)
@@ -2104,13 +2682,30 @@ class MainWindow(QMainWindow):
             e.ignore()                   # close-to-tray: hide + keep playing; Quit from the tray menu
             self.hide()
             return
+        self._save_layout()
+        if hasattr(self.config, "retry_failed_writes"):
+            self.config.retry_failed_writes()
+        if hasattr(self.config, "flush_writes"):
+            drained = self.config.flush_writes(timeout=5)
+            if not drained and getattr(self.config, "has_unsaved_writes", True):
+                e.ignore()
+                self._status_error("Changes are not saved yet. Keep this window open and retry closing after storage is available.")
+                return
         self._closing = True
+        if hasattr(self, "_import_cancel"):
+            self._import_cancel.set()
+        for cancel in tuple(getattr(self, "_export_cancels", ())):
+            cancel.set()
+        self._load_cancel.set()
+        self._play_cancel.set()
+        self._icon_cancel.set()
+        for event in self._cache_events.values():
+            event.set()
         self._play_gen += 1
         self._load_gen += 1
         mk = getattr(self, "_media_keys", None)
         if mk is not None:
             mk.uninstall()               # release the global media-key grab
-        self._save_layout()              # remember window size + column layout
         for t in (self._vu_timer, self._stats_timer, self._refresh_timer,
                   self._discord_timer, self._search_timer, self._icon_refresh):
             t.stop()                     # no stray ticks hitting a torn-down player during teardown

@@ -33,25 +33,35 @@ class IHeart(Channel):
         self._stations: list[dict] | None = None   # whole directory, cached after first load
 
     def _load(self) -> list[dict]:
-        if self._stations is not None:
-            return self._stations
+        generation, cached, current = self._snapshot_read("stations")
+        if current:
+            self._stations = cached
+            return cached
         rows: list[dict] = []
         seen: set[str] = set()
         offset, total = 0, None
         while (total is None or offset < total) and offset < 20000:   # hard safety cap
+            http.check_request_context()
             d = http.get_json(f"{API}?limit={PAGE}&offset={offset}", timeout=20)
             if not isinstance(d, dict):
-                break
-            hits = d.get("hits") or []
+                raise ValueError("iHeart returned an invalid station page")
+            hits = d.get("hits")
+            if not isinstance(hits, list) or "total" not in d:
+                raise ValueError("iHeart station page is missing required fields")
             if total is None:
-                total = d.get("total") or 0
+                total = int(d.get("total") or 0)
             if not hits:
+                if offset < total:
+                    raise ValueError("iHeart station directory ended before its reported total")
                 break
             offset += len(hits)
             for r in self._map(hits):
                 if r["url"] not in seen:
                     seen.add(r["url"])
                     rows.append(r)
+        if total is not None and offset < total:
+            raise ValueError("iHeart directory exceeds its supported safety limit")
+        rows = self._snapshot_publish("stations", generation, rows)
         self._stations = rows
         return rows
 
@@ -91,7 +101,7 @@ class IHeart(Channel):
         return out
 
     def invalidate_cache(self) -> None:
-        self._stations = None
+        super().invalidate_cache()
 
     def update_categories(self) -> list[str]:
         from collections import Counter

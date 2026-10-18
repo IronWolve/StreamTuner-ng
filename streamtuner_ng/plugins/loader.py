@@ -14,6 +14,7 @@ import importlib
 import sys
 import hashlib
 import inspect
+import os
 from pathlib import Path
 
 from .base import Channel
@@ -32,8 +33,29 @@ def application_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def plugin_directories() -> tuple[Path, ...]:
+    """Editable providers first, plus bundled providers in a mounted AppImage."""
+    bundled = application_dir() / 'plugins'
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
+        image, mount = os.environ.get('APPIMAGE'), os.environ.get('APPDIR')
+        if image and mount:
+            try:
+                image_path, mount_path = Path(image), Path(mount)
+                # Ignore inherited AppImage variables when this executable is
+                # not running inside that image's mount/extraction directory.
+                if (image_path.is_absolute() and mount_path.is_absolute()
+                        and image_path.is_file()
+                        and Path(sys.executable).resolve().is_relative_to(mount_path.resolve())):
+                    adjacent = image_path.resolve().parent / 'plugins'
+                    if adjacent != bundled:
+                        return adjacent, bundled
+            except (OSError, RuntimeError):
+                pass
+    return (bundled,)
+
+
 def user_plugin_dir(config=None) -> Path:
-    folder = application_dir() / 'plugins'
+    folder = plugin_directories()[0]
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -65,11 +87,15 @@ def _import_plugin(name, path=None):
 def load_installed_plugins(package_name) -> tuple[list[type], list[tuple[str, str]]]:
     """Scan the app's plugin directory. Each file is trusted Python code."""
     classes, errors = [], []
-    for path in sorted(user_plugin_dir().glob('*.py')):
-        if path.name.startswith('_') or path.is_symlink() or not path.stem.isidentifier():
-            continue
+    candidates = {}
+    for folder in plugin_directories():
+        for path in sorted(folder.glob('*.py')):
+            if path.name.startswith('_') or path.is_symlink() or not path.stem.isidentifier():
+                continue
+            candidates.setdefault(path.stem, path)
+    for path in candidates.values():
         try:
-            module = _import_plugin(package_name + '.' + path.stem)
+            module = _import_plugin(package_name + '.' + path.stem, path)
             classes.extend(value for _name, value in inspect.getmembers(module, inspect.isclass)
                            if issubclass(value, Channel) and value is not Channel
                            and value.__module__ == module.__name__)

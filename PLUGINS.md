@@ -6,6 +6,12 @@ file there, restart, and its Channel subclasses are discovered automatically.
 Use priority = "standard" to enable a new plugin by default. Existing saved
 per-plugin enable/disable preferences are preserved.
 
+The Linux AppImage includes the supplied providers inside the application. Put
+custom plugins in a `plugins/` folder beside the AppImage; **Tools → Open Plugins
+Folder** opens that folder. A file with the same name as a bundled provider
+overrides that provider. Updates preserve your files and refresh the bundled
+providers without copying over custom plugins.
+
 Copy _example.py to a filename without a leading underscore and give the class a
 unique lowercase id. Use imports such as:
 
@@ -74,7 +80,7 @@ is optional and defaults sensibly:
 ## Optional features
 
 - **`has_search = True`** — then `update_streams(category, search="…")` is called for searches.
-- **`page_size = 500`** — progressive loading: the UI shows the first page instantly, then
+- **`page_size = 500`** — progressive loading: the UI shows the first page when it arrives, then
   streams the rest in. Implement `update_streams_page(category, offset, limit, search)`.
 - **`needs_resolve = True`** + **`resolve_url(row)`** — if the row URL is an indirection
   that must be turned into a real stream URL at play time (e.g. a tune-in link).
@@ -92,6 +98,20 @@ is optional and defaults sensibly:
   ]
   # then in update_streams / resolve_url:  q = self.config.get("myradio_quality", "hi")
   ```
+
+## Paged results and refresh
+
+Existing list-returning providers remain supported. A paged provider can return
+`Page(rows, has_more, next_offset, complete=True, errors=())` from
+`streamtuner_ng.plugins.result`. Supply continuation from the upstream page or
+cursor, independently of how many rows survive validation. Use `complete=False`
+and short error messages for a partial batch; the app keeps the last complete
+cache and offers retry. Avoid returning an empty success for a failed request.
+
+The HTTP helpers reuse safely owned connections and observe the current request's
+deadline and cancellation. Use them instead of unmanaged background requests.
+For provider-owned snapshots, use the generation helpers on `Channel` when
+publishing data after a fetch so an older request cannot undo a refresh.
 
 ## Crash isolation
 

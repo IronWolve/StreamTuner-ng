@@ -51,7 +51,7 @@ Visit each provider’s website for its premium offerings. Use the provider’s 
 
 Playback, browsing, and customization features include:
 
-- **Global search**: Filter the loaded list as you type. Press **Enter** to search a supported catalog. **All Sources** searches enabled providers with search support and merges their results.
+- **Search scopes**: Choose **Loaded list** to filter as you type, or **This source** / **All sources** to search supported catalogs with **Enter** or **Search**. Results arrive progressively, with a clear way back to your category.
 - **Favorites & history**: Save stations, export favorites and station history as CSV, or import CSV into Favorites. Use JSON backups to restore settings and saved lists.
 - **Twenty classic themes + your own**: Dark, Light, Dracula, Nord, Solarized (light and dark), Gruvbox (dark and light), Tokyo Night, Monokai Pro, Dark Pastels, Cyberpunk Neon, Ubuntu, xterm, Amber, Green Phosphor, White Phosphor, CGA, CRT, and Synthwave. Import or export custom JSON themes with the [theme guide](THEME-HOWTO.md).
 - **Wallpapers**: Choose the Synthwave grid, either Vaporwave background, or your own image under **Options → Themes → Wallpaper**. Adjust the dim slider to keep station lists readable.
@@ -60,25 +60,6 @@ Playback, browsing, and customization features include:
 - **Visualizers**: Choose a stereo VU meter or a scrolling visualization driven by audio levels in the player bar.
 - **Desktop integration**: Use the tray and notifications where your desktop supports them. Optional Discord Rich Presence is off by default. Loudness normalization and keyboard shortcuts are included; global media keys are supported on Windows.
 - **Cached browsing**: Disk caching speeds up repeat visits, while background refreshes update station lists. Use **Reload** or **F5** to request fresh results.
-
-## Install
-
-### Release binary
-Choose the package for your platform from [Releases](https://github.com/IronWolve/StreamTuner-ng/releases):
-
-| Platform | Download | Requirements |
-| :-- | :-- | :-- |
-| **Windows x64** | [v1.3.1 ZIP](https://github.com/IronWolve/StreamTuner-ng/releases/download/v1.3.1/StreamTuner-ng_windows-x64_v131.zip) | Tested on Windows 11; audio engine included |
-| **Linux x64** | [v1.3.1 ZIP](https://github.com/IronWolve/StreamTuner-ng/releases/download/v1.3.1/StreamTuner-ng_linux-x64_v131.zip) | glibc 2.43+ and system libmpv |
-| **macOS Apple silicon** | [v1.3.2 ZIP](https://github.com/IronWolve/StreamTuner-ng/releases/download/v1.3.2/StreamTuner-ng_macos-arm64_v132.zip) | macOS 15+; audio engine included |
-
-Extract the ZIP and keep the complete folder together, including `plugins/` and bundled libraries. Start `StreamTuner-ng.exe` on Windows, `StreamTuner-ng` on Linux, or `StreamTuner-ng.app` on macOS.
-
-For Linux playback, install your distribution’s libmpv package (`libmpv2` on Debian/Ubuntu).
-
-The Windows executable is unsigned. The Mac app is ad-hoc signed and is not notarized.
-
-Each archive has a SHA-256 checksum sidecar. Matching application and native-engine source archives accompany the releases.
 
 ## Make it yours
 

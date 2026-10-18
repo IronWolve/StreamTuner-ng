@@ -10,7 +10,6 @@ server-renders a small *featured* set with richer ICY metadata, kept as a pinned
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor
 
 from ...net import http
 from ..base import Channel, make_row
@@ -71,19 +70,21 @@ class Live365(Channel):
         """The homepage's curated set, enriched with each stream's ICY headers."""
         html = http.get_text(LISTEN, headers=_BROWSER, timeout=15)
         ids = sorted(set(_ID_RE.findall(html)))
-        with ThreadPoolExecutor(max_workers=12) as ex:
-            rows = [r for r in ex.map(self._probe, ids) if r]
+        rows = [r for r in http.map_with_context(self._probe, ids, max_workers=12) if r]
         rows.sort(key=lambda r: r["title"].lower())
         return rows
 
     @staticmethod
     def _probe(sid: str) -> dict | None:
         """Read a stream's ICY headers -> a richer row (name / genre / bitrate / codec)."""
+        http.check_request_context()
         url = STREAM + sid
         try:
             r = http.session.get(url, headers={**_BROWSER, "Icy-MetaData": "1"}, timeout=8, stream=True)
             h = r.headers
             r.close()
+        except (http.RequestCancelled, http.RequestDeadlineExceeded):
+            raise
         except Exception:  # noqa: BLE001 — a dead / blocked stream is just skipped
             return None
         br = (h.get("icy-br") or "").split(",")[0].strip()

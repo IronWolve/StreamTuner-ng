@@ -31,6 +31,8 @@ def _ext(data: bytes) -> str:
 
 _ICON_PX = 64               # cache station/channel icons no larger than this (on-screen box ~16-32px)
 _MAX_ICON_BYTES = 16 << 20  # hard download cap (runaway guard): refuse a "favicon" bigger than this
+_ICON_CACHE_BYTES = 128 << 20
+_ICON_CACHE_FILES = 4096
 
 
 def _decode_icon(data: bytes, *, small: bool = True) -> bytes | None:
@@ -72,25 +74,76 @@ def _ico_to_png(data: bytes) -> bytes | None:
     return _decode_icon(data)
 
 
-def _store_icon(config, stem: str, data: bytes) -> str | None:
+def _store_icon(config, stem: str, data: bytes, *, generation: int | None = None) -> str | None:
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", stem):
         return None
+    generation = config.icon_generation if generation is None else generation
     encoded = _decode_icon(data, small=config.icon_mode() != "full")
     if not encoded:
         return None
     path = config.icon_dir / f"{stem}.png"
     temporary = None
+    with config._icon_lock:
+        if generation != config._icon_generation:
+            return None
+        try:
+            fd, temporary = tempfile.mkstemp(prefix="icon-", dir=config.icon_dir)
+            with os.fdopen(fd, "wb") as out:
+                out.write(encoded)
+            os.replace(temporary, path)
+            _trim_icon_cache(config, protect=path)
+            return str(path)
+        except OSError:
+            return None
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def _generated_icon_files(config):
+    """Return only names this module creates; leave unrelated profile files alone."""
+    files = []
     try:
-        fd, temporary = tempfile.mkstemp(prefix="icon-", dir=config.icon_dir)
-        with os.fdopen(fd, "wb") as out:
-            out.write(encoded)
-        os.replace(temporary, path)
-        return str(path)
+        for path in config.icon_dir.iterdir():
+            if path.is_symlink() or not path.is_file():
+                continue
+            stem = path.stem
+            generated = (
+                path.suffix in (".png", ".ico")
+                and stem.startswith("chan_") and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", stem[5:])
+            ) or (
+                path.suffix in (".png", ".miss")
+                and stem.startswith("st_") and re.fullmatch(r"[a-f0-9]{16}", stem[3:])
+            )
+            if generated:
+                files.append(path)
     except OSError:
-        return None
-    finally:
-        if temporary and os.path.exists(temporary):
-            os.unlink(temporary)
+        pass
+    return files
+
+
+def _trim_icon_cache(config, protect=None) -> None:
+    """Bound generated icon storage while preserving the item just fetched."""
+    sized, total = [], 0
+    for path in _generated_icon_files(config):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        total += stat.st_size
+        sized.append((stat.st_mtime_ns, path, stat.st_size))
+    count = len(sized)
+    for _modified, path, size in sorted(sized):
+        if total <= _ICON_CACHE_BYTES and count <= _ICON_CACHE_FILES:
+            break
+        if path == protect:
+            continue
+        try:
+            path.unlink()
+            total -= size
+            count -= 1
+        except OSError:
+            continue
 
 
 def migrate_ico_to_png(config) -> int:
@@ -98,6 +151,7 @@ def migrate_ico_to_png(config) -> int:
     ICO unreliably (esp. 24-bit, e.g. SHOUTcast). Idempotent — once converted, none remain, so later
     startups are a cheap no-op. Returns how many were converted."""
     n = 0
+    generation = config.icon_generation
     try:
         icos = list(config.icon_dir.glob("*.ico"))
     except Exception:  # noqa: BLE001
@@ -108,11 +162,26 @@ def migrate_ico_to_png(config) -> int:
                 continue
             png = _ico_to_png(ico.read_bytes())
             if png:
-                ico.with_suffix(".png").write_bytes(png)
-                ico.unlink()
-                n += 1
+                with config._icon_lock:
+                    if generation != config._icon_generation:
+                        break
+                    target = ico.with_suffix(".png")
+                    fd, temporary = tempfile.mkstemp(prefix="icon-migrate-", dir=config.icon_dir)
+                    try:
+                        with os.fdopen(fd, "wb") as out:
+                            out.write(png)
+                        os.replace(temporary, target)
+                        ico.unlink()
+                        n += 1
+                    finally:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
         except Exception:  # noqa: BLE001
             pass
+    if n:
+        with config._icon_lock:
+            if generation == config._icon_generation:
+                _trim_icon_cache(config)
     return n
 
 
@@ -166,13 +235,14 @@ def ensure_favicon(config, channel) -> str | None:
     home = getattr(channel, "homepage", "")
     if not home:
         return None
+    generation = config.icon_generation
     for existing in config.icon_dir.glob(f"chan_{channel.id}.*"):
         if _usable_cached_icon(existing):
-            return str(existing)
+            return str(existing) if generation == config.icon_generation else None
     data = _fetch(home)
     if not data:
         return None
-    return _store_icon(config, f"chan_{channel.id}", data)
+    return _store_icon(config, f"chan_{channel.id}", data, generation=generation)
 
 
 _BROWSER_UA = {"User-Agent": http.BROWSER_UA}
@@ -319,21 +389,22 @@ def derive_station_favicon_url(row: dict) -> str | None:
     return favicon_url_for_home(home) if home else None
 
 
-def station_favicon(config, url: str) -> str | None:
+def station_favicon(config, url: str, *, _generation: int | None = None) -> str | None:
     """Download + cache a station's favicon (the row's `favicon` URL), keyed by URL
     hash. Returns the cached path, or None. Cached on disk -> no re-fetch next time."""
     if not valid_url(url, web=True):
         return None
+    generation = config.icon_generation if _generation is None else _generation
     h = _hash(url)
     for existing in config.icon_dir.glob(f"st_{h}.*"):
         if _recent_miss(existing):
             return None
         if _usable_cached_icon(existing):
-            return str(existing)
+            return str(existing) if generation == config.icon_generation else None
     try:
         data = http.get_bytes(url, timeout=_FAV_TIMEOUT, max_bytes=_MAX_ICON_BYTES)
         if data and len(data) > 70:
-            return _store_icon(config, f"st_{h}", data)
+            return _store_icon(config, f"st_{h}", data, generation=generation)
     except Exception:  # noqa: BLE001
         return None
     return None
@@ -348,7 +419,7 @@ def _derived_home(row: dict) -> str:
     return home or ""
 
 
-def derived_station_favicon(config, row: dict) -> str | None:
+def derived_station_favicon(config, row: dict, *, _generation: int | None = None) -> str | None:
     """For a station the directory gives no favicon for (Shoutcast, TuneIn, …), derive the
     broadcaster's REAL logo from its own site (row `homepage`, else the stream's ICY `icy-url`),
     preferring a big apple-touch-icon over the tiny /favicon.ico. Cached keyed by the STATION
@@ -356,20 +427,26 @@ def derived_station_favicon(config, row: dict) -> str | None:
     surl = row.get("url", "")
     if not valid_url(surl, web=True):
         return None
+    generation = config.icon_generation if _generation is None else _generation
     h = _hash("derived:" + surl)
     for existing in config.icon_dir.glob(f"st_{h}.*"):
         if _recent_miss(existing):
             return None
         if _usable_cached_icon(existing):
-            return str(existing)
+            return str(existing) if generation == config.icon_generation else None
     home = _derived_home(row)
     data = _best_icon_bytes(home) if home else None
     if data:
-        return _store_icon(config, f"st_{h}", data)
-    try:
-        (config.icon_dir / f"st_{h}.miss").write_bytes(b"")   # remember the miss; don't re-derive
-    except Exception:  # noqa: BLE001
-        pass
+        return _store_icon(config, f"st_{h}", data, generation=generation)
+    marker = config.icon_dir / f"st_{h}.miss"
+    with config._icon_lock:
+        if generation != config._icon_generation:
+            return None
+        try:
+            marker.write_bytes(b"")   # remember the miss; don't re-derive
+            _trim_icon_cache(config, protect=marker)
+        except Exception:  # noqa: BLE001
+            pass
     return None
 
 
@@ -379,28 +456,35 @@ def best_station_icon(config, row: dict, *, refetch: bool = False) -> str | None
     cached file for this station and re-fetches, preferring the big derived broadcaster logo."""
     surl = row.get("url", "") or ""
     fav = row.get("favicon", "") or ""
+    generation = config.icon_generation
     hd = _hash("derived:" + surl) if surl else ""
     if refetch:
-        for h in filter(None, (hd, _hash(fav) if fav else "")):
-            for p in config.icon_dir.glob(f"st_{h}.*"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-        return derived_station_favicon(config, row) or (station_favicon(config, fav) if fav else None)
+        with config._icon_lock:
+            if generation != config._icon_generation:
+                return None
+            for h in filter(None, (hd, _hash(fav) if fav else "")):
+                for p in config.icon_dir.glob(f"st_{h}.*"):
+                    try:
+                        if not p.is_symlink():
+                            p.unlink()
+                    except OSError:
+                        pass
+        return derived_station_favicon(config, row, _generation=generation) or (
+            station_favicon(config, fav, _generation=generation) if fav else None
+        )
     derived_missed = False
     if hd:
         for existing in config.icon_dir.glob(f"st_{hd}.*"):
             if _recent_miss(existing):
                 derived_missed = True
             elif _usable_cached_icon(existing):
-                return str(existing)                  # a recached/cached broadcaster logo wins
+                return str(existing) if generation == config.icon_generation else None
     if fav:
-        p = station_favicon(config, fav)
+        p = station_favicon(config, fav, _generation=generation)
         if p:
             return p
     if hd and not derived_missed:
-        return derived_station_favicon(config, row)
+        return derived_station_favicon(config, row, _generation=generation)
     return None
 
 

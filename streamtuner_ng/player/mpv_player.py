@@ -131,7 +131,7 @@ class Player:
                         self._end_errors.pop(next(iter(self._end_errors)))
 
             self.available = True
-            self.enable_meter(True)        # astats filter feeding the VU meter (no latency)
+            # The window enables metering only while the visualization is visible.
         except Exception as exc:  # noqa: BLE001 — any failure -> graceful degrade
             self.error = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
 

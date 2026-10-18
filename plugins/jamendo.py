@@ -7,8 +7,6 @@ each radio's continuous stream URL comes from `radios/stream/?id=<id>`. mpv play
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-
 from ...net import http
 from ..base import Channel, make_row
 
@@ -33,15 +31,17 @@ class Jamendo(Channel):
         radios = data.get("results", []) if isinstance(data, dict) else []
 
         def stream_of(rd):
+            http.check_request_context()
             try:
                 s = http.get_json(f"{API}/radios/stream/",
                                   {"client_id": CID, "id": rd.get("id"), "format": "json"}, timeout=12)
                 return (s.get("results") or [{}])[0]
+            except (http.RequestCancelled, http.RequestDeadlineExceeded):
+                raise
             except Exception:  # noqa: BLE001 — a missing stream just drops that radio
                 return {}
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            streams = list(ex.map(stream_of, radios))
+        streams = http.map_with_context(stream_of, radios, max_workers=8)
 
         rows = []
         for rd, res in zip(radios, streams):

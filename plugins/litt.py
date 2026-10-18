@@ -26,13 +26,20 @@ class Litt(Channel):
         self._stations: list[dict] | None = None
 
     def _load(self) -> list[dict]:
-        if self._stations is not None:
-            return self._stations
+        generation, cached, current = self._snapshot_read("stations")
+        if current:
+            self._stations = cached
+            return cached
         try:
             d = http.get_json(API, timeout=20)
             stations = ((d or {}).get("data") or {}).get("stations") or []
-        except Exception:  # noqa: BLE001 — airlock-safe; channel just shows empty/red
-            stations = []
+        except Exception:
+            # Keep last-good data available for diagnostics/retry, but do not
+            # report a transport/API error as a successful empty snapshot.
+            has_newer, newer = self._snapshot_after_error("stations", generation)
+            if has_newer:
+                return newer
+            raise
         rows = []
         for s in stations:
             if s.get("enabled") is False:
@@ -50,11 +57,12 @@ class Litt(Channel):
                 format="audio/mpeg",
                 listformat="url",
             ))
+        rows = self._snapshot_publish("stations", generation, rows)
         self._stations = rows
         return rows
 
     def invalidate_cache(self) -> None:
-        self._stations = None
+        super().invalidate_cache()
 
     def update_categories(self) -> list[str]:
         genres = sorted({r["genre"] for r in self._load() if r.get("genre")})

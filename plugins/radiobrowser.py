@@ -13,10 +13,12 @@ from urllib.parse import quote
 
 from ...net import http
 from ..base import Channel, make_row
+from ..result import Page
 
 # Mirrors — the project load-balances across these; we shuffle + fail over so a single
 # bad/overloaded mirror (a 502 / timeout) just rolls to the next instead of erroring out.
 _SERVERS = ["de1"]  # fallback; discover the current list through the provider
+_MAX_MIRRORS_PER_CALL = 3
 
 
 class RadioBrowser(Channel):
@@ -52,17 +54,22 @@ class RadioBrowser(Channel):
                 if discovered:
                     random.shuffle(discovered)
                     self._order = discovered
+            except (http.RequestCancelled, http.RequestDeadlineExceeded):
+                raise
             except Exception:
                 pass  # bounded fallback when discovery is unavailable
         order = ([self._good] + [s for s in self._order if s != self._good]) if self._good else self._order
         last: Exception | None = None
-        for srv in order:
+        for srv in order[:_MAX_MIRRORS_PER_CALL]:
+            http.check_request_context()
             try:
                 data = http.get_json(f"https://{srv}.api.radio-browser.info/json/{endpoint}",
                                      params, timeout=timeout)
                 self._good = srv
                 return data
-            except Exception as exc:  # noqa: BLE001 — dead/overloaded mirror -> try the next one
+            except (http.RequestCancelled, http.RequestDeadlineExceeded):
+                raise
+            except Exception as exc:  # dead/overloaded mirror -> try the next one
                 last = exc
         raise last if last else RuntimeError("no radio-browser mirror reachable")
 
@@ -107,23 +114,36 @@ class RadioBrowser(Channel):
             ))
         return rows
 
-    def update_streams_page(self, category, offset=0, limit=None, search=None) -> list[dict]:
+    def update_streams_page(self, category, offset=0, limit=None, search=None) -> Page:
         limit = limit or self._ALL
         params = {"hidebroken": "true", "order": "clickcount", "reverse": "true",
                   "limit": limit, "offset": offset}
         if search:                           # a search overrides the category — searches the whole directory
             params["name"] = search
-            return self._map(self._get("stations/search", params, self._FETCH_TIMEOUT))
+            raw = self._get("stations/search", params, self._FETCH_TIMEOUT)
+            return self._page(raw, offset, limit, self._ALL)
         if category == self.TOP:
             if offset >= 1000:
-                return []
+                return self._page([], offset, 0, 1000)
             params["limit"] = min(limit, 1000 - offset)
-            return self._map(self._get("stations/topclick", params, self._FETCH_TIMEOUT))
+            raw = self._get("stations/topclick", params, self._FETCH_TIMEOUT)
+            return self._page(raw, offset, params["limit"], 1000)
         if category == self.ALL:
             endpoint = "stations"                    # the entire directory (~57k)
         else:
             endpoint = "stations/bytag/" + quote(category.lower(), safe="")
-        return self._map(self._get(endpoint, params, self._FETCH_TIMEOUT))
+        raw = self._get(endpoint, params, self._FETCH_TIMEOUT)
+        return self._page(raw, offset, limit, self._ALL)
+
+    def _page(self, raw, offset: int, requested: int, ceiling: int) -> Page:
+        # Preserve the API row count before make_row/security sanitization. A full
+        # raw page may sanitize to zero valid stations and still need continuation.
+        raw_count = len(raw) if isinstance(raw, list) else 0
+        rows = self._map(raw if isinstance(raw, list) else [])
+        has_more = bool(raw_count and raw_count >= requested and offset + raw_count < ceiling)
+        return Page(rows, has_more=has_more,
+                    next_offset=offset + raw_count if has_more else None)
 
     def update_streams(self, category, search=None) -> list[dict]:
-        return self.update_streams_page(category, 0, self._ALL, search)
+        page = self.update_streams_page(category, 0, self._ALL, search)
+        return page.rows if isinstance(page, Page) else page

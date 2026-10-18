@@ -60,12 +60,22 @@ def build_tray(window, host, player):
 
     fav_menu = menu.addMenu("★ Favorites")
     bm = host.channels.get("bookmarks")
-    if bm and bm.favourite:
-        for row in bm.favourite[:25]:
-            fav_menu.addAction(row.get("title", "?"),
-                               lambda _=False, r=row: player.play(r["url"]))
-    else:
-        fav_menu.addAction("(none yet)").setEnabled(False)
+
+    def rebuild_favorites() -> None:
+        fav_menu.clear()
+        rows = list(getattr(bm, "favourite", ()) or ())[:25] if bm else []
+        if not rows:
+            fav_menu.addAction("(none yet)").setEnabled(False)
+            return
+        for row in rows:
+            snapshot = dict(row)
+            fav_menu.addAction(snapshot.get("title", "?"),
+                               lambda _=False, r=snapshot: window._play_row(r))
+
+    # The menu is a view of mutable Favorites data. Refresh immediately before it opens so
+    # additions/removals made after startup are reflected without rebuilding the tray icon.
+    fav_menu.aboutToShow.connect(rebuild_favorites)
+    rebuild_favorites()
 
     menu.addSeparator()
     menu.addAction("Show / Hide", window._toggle_window)

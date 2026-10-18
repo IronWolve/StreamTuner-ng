@@ -8,7 +8,7 @@ which keeps it headless-testable -- see `python -m streamtuner_ng --selftest`.
 """
 
 # Single source of truth for the version (read everywhere; never duplicated).
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 APP_NAME = "StreamTuner-ng"   # human-facing display name
 APP_ID = "streamtuner-ng"     # filesystem / config-dir name (lowercase)

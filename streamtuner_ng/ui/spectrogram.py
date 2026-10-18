@@ -47,16 +47,18 @@ class Spectrogram(QWidget):
         self._lut = _colormap()
         self._img = QImage(self.HISTORY, self.BINS, QImage.Format_RGB32)
         self._img.fill(0)
+        self._idle_columns = self.HISTORY
         self._t = 0
         self._dragging = False
         self.setFixedWidth(self.DEFAULT_W)
         self.setMinimumHeight(22)
         self.setMouseTracking(True)
-        self.setToolTip("Spectrum — drag the left edge to widen it")
+        self.setToolTip("Level history — drag the left edge to widen it")
 
     # ---- data feed (called ~30 fps by the main window) ----
     def push(self, rms_db: float, crest_db: float) -> None:
         """Add one column from the live level: rms_db ≈ loudness, crest_db = peak − rms."""
+        self._idle_columns = 0
         rms = self._norm(rms_db)
         crest = max(0.0, min(1.0, crest_db / 24.0))      # transient-ness, 0..1
         self._t += 1
@@ -72,6 +74,9 @@ class Spectrogram(QWidget):
 
     def idle(self) -> None:
         """No audio: scroll in a black column so it fades out."""
+        if self._idle_columns >= self.HISTORY:
+            return
+        self._idle_columns += 1
         self._t += 1
         self._img = self._img.copy(1, 0, self.HISTORY, self.BINS)
         self.update()

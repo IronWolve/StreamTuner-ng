@@ -37,11 +37,12 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         check('crash budget disables plugin', host.health['_broken_throw'].auto_disabled and not host.is_enabled('_broken_throw'))
         check('healthy local plugin remains usable', host.categories('bookmarks').status is Status.OK)
         import inspect
-        from .plugins.loader import user_plugin_dir
+        from .plugins.loader import plugin_directories
         provider_files = [Path(inspect.getfile(cls)).resolve() for cls in BUILTINS
                           if cls.id not in ('bookmarks', 'local')]
-        check('providers load from the adjacent plugins directory', len(provider_files) >= 12 and
-              all(path.parent == user_plugin_dir().resolve() for path in provider_files))
+        provider_roots = {folder.resolve() for folder in plugin_directories()}
+        check('providers load from the installed plugin directories', len(provider_files) >= 12 and
+              all(path.parent in provider_roots for path in provider_files))
 
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
         check('supported network URLs accepted', valid_url('https://example.com/live'))

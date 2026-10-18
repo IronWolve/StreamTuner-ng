@@ -10,6 +10,12 @@ AUDIOADDICT_DOMAINS = frozenset(('di.fm', 'radiotunes.com', 'jazzradio.com',
 MAX_URL = 8192
 MAX_ROWS = 100_000
 MAX_IMPORT_BYTES = 32 << 20
+# Runtime stores have their own compatible read/write limits. Imports stay
+# smaller because they are parsed synchronously by existing UI entry points.
+MAX_STORE_BYTES = 128 << 20
+MAX_CACHE_BYTES = 64 << 20
+MAX_CACHE_DISK_BYTES = 256 << 20
+MAX_CACHE_FILES = 256
 _IDENTIFIER = re.compile(r'[a-zA-Z0-9_][a-zA-Z0-9_-]{0,63}\Z')
 _SECRET = re.compile(r'(?:password|passwd|secret|token|authorization|credential|listen.?key|api.?key)', re.I)
 

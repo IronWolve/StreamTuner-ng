@@ -4,11 +4,14 @@ built-in channels, apply the theme, show the window (+ tray)."""
 from __future__ import annotations
 
 import sys
+import time
 
 from .. import APP_NAME, asset_path
 from ..config import Config
 from ..player import Player
-from ..plugins.channels import BUILTINS, PLUGIN_ERRORS
+from ..plugins.channels import discover_builtin_channels
+from ..plugins.channels.bookmarks import Bookmarks
+from ..plugins.channels.local import Local
 from ..plugins.host import PluginHost
 
 
@@ -40,19 +43,12 @@ def run_app() -> int:
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateMenu, False)
     app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
 
+    started = time.monotonic()
     config = Config()
+    config.enable_async_writes()
     host = PluginHost(config)
-    plugin_errors = list(PLUGIN_ERRORS)
-    for cls in BUILTINS:
-        try:
-            host.register(cls(config))
-        except BaseException as exc:
-            plugin_errors.append((getattr(cls, 'id', cls.__name__), config.redact(str(exc))))
-
-    # user plugins: anyone can drop a .py in ~/.config/streamtuner-ng/plugins/
-    from ..plugins.loader import register_user_plugins
-    n_user, legacy_errors = register_user_plugins(host, config)
-    plugin_errors.extend(legacy_errors)
+    host.register(Bookmarks(config))
+    host.register(Local(config))
 
     player = Player()
     # belt-and-braces: stop audio whenever the app is quitting, however it quits
@@ -71,9 +67,6 @@ def run_app() -> int:
     app.setPalette(palette(_mode))         # so the OS palette (e.g. Windows dark mode) can't bleed in
     app.setStyleSheet(stylesheet(_mode, font_family=_ffam, font_px=_fpx))
 
-    from ..favicons import migrate_ico_to_png
-    migrate_ico_to_png(config)             # cached .ico logos -> PNG (Qt renders ICO unreliably; e.g. SHOUTcast)
-
     from .worker import set_io_threads
     set_io_threads(int(config.get("io_threads", 4)))   # apply the saved icon-fetch concurrency
 
@@ -84,13 +77,58 @@ def run_app() -> int:
     win._tray = build_tray(win, host, player)   # keep a ref so it isn't GC'd
 
     win.show()
-    if n_user or plugin_errors:
-        win.statusBar().showMessage(
-            f"Loaded {n_user} user plugin(s)"
-            + (f" — {len(plugin_errors)} failed (see Options)" if plugin_errors else "")
-        )
+    win._startup_timings = {"shell_seconds": time.monotonic() - started}
+    win._list_message("Loading services…")
+    from .worker import run_io
+    from PySide6.QtCore import QTimer
+    import threading
+    boot_cancel = threading.Event()
+    app.aboutToQuit.connect(boot_cancel.set)
+
+    def discover():
+        classes, errors = discover_builtin_channels()
+        staged = PluginHost(config)
+        for cls in classes:
+            if cls.id in ("bookmarks", "local"):
+                continue
+            try:
+                staged.register(cls(config))
+            except BaseException as exc:
+                errors.append((getattr(cls, "id", cls.__name__), config.redact(str(exc))))
+        from ..plugins.loader import register_user_plugins
+        _count, legacy_errors = register_user_plugins(staged, config)
+        return list(staged.channels.values()), list(errors) + legacy_errors
+
+    def ready(result):
+        if win._closing or boot_cancel.is_set():
+            return
+        if isinstance(result, BaseException):
+            win._list_message("Service discovery failed: " + config.redact(result))
+            return
+        channels, errors = result
+        for channel in channels:
+            try:
+                host.register(channel)
+            except (ValueError, TypeError) as exc:
+                errors.append((channel.id, config.redact(exc)))
+        host.load_errors = errors
+        win._populate_channels()
+        win._rebuild_channels_menu()
+        win._load_channel_favicons()
+        win._startup_timings["services_seconds"] = time.monotonic() - started
+        if errors:
+            win._list_message(f"{len(channels)} services loaded; {len(errors)} plugin(s) could not load")
+            win._list_notice.setToolTip("\n".join(f"{name}: {error}" for name, error in errors))
+        elif not win.model.rowCount():
+            win._list_message(win._empty_message(win.current_channel, win.current_category))
+        # Legacy icon conversion is optional maintenance after first paint.
+        from ..favicons import migrate_ico_to_png
+        run_io(lambda: migrate_ico_to_png(config), lambda *_: win.table.viewport().update(), cancelled=boot_cancel)
+
+    QTimer.singleShot(0, lambda: run_io(discover, ready, cancelled=boot_cancel))
     rc = app.exec()
     from .worker import drain_cache
     drain_cache()
+    config.flush_writes()
     player.shutdown()
     return rc

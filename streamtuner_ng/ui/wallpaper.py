@@ -10,11 +10,16 @@ non-wallpaper themes are completely unaffected.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from pathlib import Path
+
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
 _BUILTIN_CACHE: dict = {}   # spec -> QPixmap: generate Synthwave / decode the bundled JPEGs only once
+_CUSTOM_CACHE: OrderedDict[tuple[str, int, int], QPixmap] = OrderedDict()
+_CUSTOM_CACHE_LIMIT = 2
 
 # Bundled wallpaper images (in streamtuner_ng/assets/wallpapers/), keyed by their short spec name.
 _BUNDLED = {
@@ -43,10 +48,20 @@ class WallpaperWidget(QWidget):
         self._dim = 35
 
     def set_wallpaper(self, pix: QPixmap | None, dim: int = 35) -> None:
-        self._pix = pix if (pix is not None and not pix.isNull()) else None
-        self._scaled = None                      # source changed -> drop the cached scale
-        self._scaled_size = None
+        pix = pix if (pix is not None and not pix.isNull()) else None
+        if pix is not self._pix:
+            self._pix = pix
+            self._scaled = None                  # source changed -> drop the cached scale
+            self._scaled_size = None
         self._dim = max(0, min(90, int(dim)))
+        self.update()
+
+    def set_dim(self, dim: int) -> None:
+        """Change only the overlay opacity; keep decoded and size-scaled image caches intact."""
+        dim = max(0, min(90, int(dim)))
+        if dim == self._dim:
+            return
+        self._dim = dim
         self.update()
 
     def has_wallpaper(self) -> bool:
@@ -137,15 +152,24 @@ def load_wallpaper(spec: str, base_dir=None) -> QPixmap | None:
         pm = pm if not pm.isNull() else None
         _BUILTIN_CACHE[spec] = pm
         return pm
-    from pathlib import Path
     candidates = [Path(spec)]
     if base_dir is not None:
         candidates.append(Path(base_dir) / spec)
     for c in candidates:
         try:
             if c.is_file():
-                pm = QPixmap(str(c))
+                resolved = c.resolve()
+                stat = resolved.stat()
+                key = (str(resolved), stat.st_mtime_ns, stat.st_size)
+                if key in _CUSTOM_CACHE:
+                    _CUSTOM_CACHE.move_to_end(key)
+                    return _CUSTOM_CACHE[key]
+                pm = QPixmap(str(resolved))
                 if not pm.isNull():
+                    _CUSTOM_CACHE[key] = pm
+                    _CUSTOM_CACHE.move_to_end(key)
+                    while len(_CUSTOM_CACHE) > _CUSTOM_CACHE_LIMIT:
+                        _CUSTOM_CACHE.popitem(last=False)
                     return pm
         except OSError:
             pass

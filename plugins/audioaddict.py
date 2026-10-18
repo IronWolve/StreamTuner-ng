@@ -1,19 +1,17 @@
 """AudioAddict (the DI.FM family) — one keyless API, six networks as the CATEGORIES of a single
 channel: DI.FM, RadioTunes, JazzRadio, RockRadio, ClassicalRadio, ZenRadio.
 
-Playback needs a paid subscriber LISTEN KEY. AudioAddict decommissioned its FREE public cluster —
-the `pubN.<domain>` hosts that the `public3` playlists hand out are now NXDOMAIN (dead), so there is
-no working free stream. The premium hosts (`prem1.<domain>`) are alive and require the key.
-
-Channel lists come from api.audioaddict.com (no key). Rows carry a tokenized
+Subscriber playback needs a LISTEN KEY. Channel lists and premium playlists come
+from api.audioaddict.com without sending that key. Rows carry a tokenized
 `audioaddict://<domain>/<channel>` URL so the key is NEVER written to disk caches, favourites/history,
-CSV exports, or the status bar; the real stream URL is built only at play time in resolve_url():
-    http://prem1.<domain>/<channel>[_hi|_aac]?<listen_key>   (320k MP3 / 128k AAC / 64k AAC)
+CSV exports, or the status bar. The provider's playlist supplies the network's
+actual stream address; the key is added only to a validated premium host at play time.
 The plugin is off by default. Subscriber playback uses the provider-required HTTP transport.
 """
 
 from __future__ import annotations
 
+import re
 from urllib.parse import quote, urlsplit
 
 from ...net import http
@@ -21,7 +19,12 @@ from ...security import valid_url
 from ..base import Channel, make_row
 
 API = "https://api.audioaddict.com/v1/{net}/channels"
+PLAYLIST_API = "https://api.audioaddict.com/v1/{net}/listen/{quality}/{channel}.pls"
 _SCHEME = "audioaddict://"
+# Keep saved option values compatible; these are choices, not stream suffixes.
+_QUALITY_SETS = {"_hi": ("premium_high", "audio/mpeg", 320),
+                 "": ("premium", "audio/aac", 128),
+                 "_aac": ("premium_medium", "audio/aac", 64)}
 
 # (category label, network slug, stream domain)
 NETWORKS = [
@@ -33,6 +36,7 @@ NETWORKS = [
     ("ZenRadio",       "zenradio",       "zenradio.com"),
 ]
 _BY_LABEL = {label: (net, domain) for label, net, domain in NETWORKS}
+_BY_DOMAIN = {domain: net for _label, net, domain in NETWORKS}
 
 
 class AudioAddict(Channel):
@@ -40,7 +44,7 @@ class AudioAddict(Channel):
     title = "AudioAddict"
     description = "AudioAddict family — DI.FM, RadioTunes, JazzRadio, RockRadio, ClassicalRadio, ZenRadio."
     homepage = "https://www.audioaddict.com/"
-    priority = "optional"        # needs a subscriber listen key (free cluster is dead); off until set
+    priority = "optional"        # subscriber listen key required; off until set
     has_search = True
     needs_resolve = True         # rows carry audioaddict://… ; the listen key is added only at play time
     category_sort = False        # keep the networks in their listed order, not A–Z
@@ -85,10 +89,11 @@ class AudioAddict(Channel):
         return rows
 
     def resolve_url(self, row: dict) -> dict:
-        """Build the real premium stream URL at play time from `audioaddict://<domain>/<channel>`,
-        using the user's listen key. The key is applied here only — never written into the row that
-        gets cached/favourited/exported/displayed. Missing keys are rejected because the free
-        cluster is decommissioned. Premium playback uses the provider-required HTTP transport."""
+        """Resolve a provider playlist without credentials, then add the key in memory.
+
+        Mount names and quality suffixes differ between networks (including Zen's
+        `zr` prefix). Only premium hosts for the selected network receive the key.
+        """
         u = row.get("url", "")
         if not u.startswith(_SCHEME):
             return row
@@ -99,8 +104,28 @@ class AudioAddict(Channel):
         listen_key = ((self.config.get("audioaddict_listen_key", "") if self.config else "") or "").strip()
         if not listen_key:
             raise ValueError("An AudioAddict subscriber listen key is required")
-        # quality suffix: '' = 128k AAC, '_hi' = 320k MP3, '_aac' = 64k AAC (right-click Bitrate; default 320k)
         q = ((self.config.get("audioaddict_quality", "_hi") if self.config else "_hi") or "")
-        if q not in ("", "_hi", "_aac"):
+        if not isinstance(q, str) or q not in _QUALITY_SETS:
             q = "_hi"
-        return {**row, "url": f"http://prem1.{domain}/{ch}{q}?{quote(listen_key, safe='')}"}
+        quality, audio_format, bitrate = _QUALITY_SETS[q]
+        playlist = http.get_text(
+            PLAYLIST_API.format(net=_BY_DOMAIN[domain], quality=quality, channel=quote(ch, safe="")),
+            timeout=8, max_bytes=64 << 10,
+        )
+        for line in playlist.splitlines():
+            field, separator, value = line.partition("=")
+            if not separator or not re.fullmatch(r"File[1-9][0-9]*", field.strip(), re.IGNORECASE):
+                continue
+            stream = value.strip()
+            if not valid_url(stream):
+                continue
+            parsed_stream = urlsplit(stream)
+            if (parsed_stream.scheme not in ("http", "https")
+                    or not re.fullmatch(r"prem[1-9][0-9]*\." + re.escape(domain), parsed_stream.hostname or "")
+                    or parsed_stream.port not in (None, 80 if parsed_stream.scheme == "http" else 443)
+                    or not re.fullmatch(r"/[A-Za-z0-9_-]+", parsed_stream.path)
+                    or parsed_stream.query or parsed_stream.fragment):
+                continue
+            return {**row, "url": f"{stream}?{quote(listen_key, safe='')}",
+                    "format": audio_format, "bitrate": bitrate}
+        raise ValueError("AudioAddict returned no valid premium stream for this station and quality")

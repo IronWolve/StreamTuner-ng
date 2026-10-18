@@ -25,8 +25,21 @@ class SomaFM(Channel):
         self._channels: list[dict] = []
 
     def _fetch(self) -> list[dict]:
-        self._channels = http.get_json(FEED).get("channels", [])
-        return self._channels
+        generation, cached, current = self._snapshot_read("channels")
+        if current:
+            self._channels = cached
+            return cached
+        try:
+            data = http.get_json(FEED)
+            channels = data.get("channels", [])
+        except Exception:
+            has_newer, newer = self._snapshot_after_error("channels", generation)
+            if has_newer:
+                return newer
+            raise
+        channels = self._snapshot_publish("channels", generation, channels)
+        self._channels = channels
+        return channels
 
     @staticmethod
     def _best_playlist(ch: dict) -> tuple[str, str]:
@@ -45,7 +58,7 @@ class SomaFM(Channel):
         return top.get("url", ""), _FMT_MIME.get(top.get("format", ""), "audio/mpeg")
 
     def invalidate_cache(self) -> None:
-        self._channels = []
+        super().invalidate_cache()
 
     def update_categories(self) -> list[str]:
         chans = self._fetch()
@@ -53,7 +66,8 @@ class SomaFM(Channel):
         return ["All"] + genres
 
     def update_streams(self, category: str, search: str | None = None) -> list[dict]:
-        chans = self._channels or self._fetch()
+        _generation, _cached, current = self._snapshot_read("channels")
+        chans = self._fetch() if not current else self._channels
         rows = []
         for c in chans:
             genre = c.get("genre", "")

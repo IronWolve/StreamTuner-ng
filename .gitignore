@@ -163,3 +163,4 @@
 !/streamtuner_ng/ui/vumeter.py
 !/streamtuner_ng/ui/wallpaper.py
 !/streamtuner_ng/ui/worker.py
+!/streamtuner_ng/ui/cache.py
