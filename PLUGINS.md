@@ -11,11 +11,29 @@ file there, restart, and its Channel subclasses are discovered automatically.
 Use priority = "standard" to enable a new plugin by default. Existing saved
 per-plugin enable/disable preferences are preserved.
 
-The Linux AppImage includes the supplied providers inside the application. Put
-custom plugins in a `plugins/` folder beside the AppImage; **Tools → Open Plugins
-Folder** opens that folder. A file with the same name as a bundled provider
-overrides that provider. Updates preserve your files and refresh the bundled
-providers without copying over custom plugins.
+## Installing a plugin with the Linux AppImage
+
+1. Keep the AppImage in a folder you can write to.
+2. In the app, choose **Tools → Open Plugins Folder**. This opens `plugins/`
+   beside the AppImage and supplies an `_example.py` reference.
+3. Copy your plugin's `.py` file into that folder. To write your own, copy
+   `_example.py` to a new name such as `myradio.py` and give its class a unique ID.
+4. Restart StreamTuner-NG. Plugins with `priority = "standard"` appear
+   automatically; other plugins can be enabled in **Options → Plugins**.
+
+```text
+Radio/
+├── StreamTuner-ng.AppImage
+└── plugins/
+    ├── _example.py
+    └── myradio.py
+```
+
+You do not need to extract or modify the AppImage. Supplied providers stay
+inside it; your plugins stay beside it. When updating or moving the app, keep
+the `plugins/` folder alongside the AppImage. A file with the same name as a
+bundled provider overrides that provider. Use a different filename for a new
+provider, and avoid spaces, hyphens or a leading underscore in plugin filenames.
 
 Copy _example.py to a filename without a leading underscore and give the class a
 unique lowercase id. Use imports such as:

@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 import time
 
-from .. import APP_NAME, asset_path
+from .. import APP_ID, APP_NAME, asset_path
 from ..config import Config
 from ..player import Player
 from ..plugins.channels import discover_builtin_channels
@@ -36,6 +36,8 @@ def run_app() -> int:
     app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    if sys.platform.startswith("linux"):
+        app.setDesktopFileName(APP_ID)
     from PySide6.QtGui import QIcon
     app.setWindowIcon(QIcon(asset_path("logo.png")))   # taskbar / title-bar / alt-tab icon
     app.setQuitOnLastWindowClosed(True)
