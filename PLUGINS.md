@@ -1,5 +1,10 @@
 # Python plugins
 
+Save personal stream URLs with **Add station…** on the toolbar or **Ctrl+N**.
+You can name one station or paste several URLs, one per line, into **Add multiple
+URLs**. Saved stations appear under **Local → My Stations**. This guide covers
+Python extensions for adding provider catalogs and custom behavior.
+
 The application scans its adjacent plugins/ directory at startup. The supplied
 station providers are ordinary Python files in that directory too. Drop a Python
 file there, restart, and its Channel subclasses are discovered automatically.

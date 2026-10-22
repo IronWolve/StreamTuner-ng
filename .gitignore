@@ -126,6 +126,7 @@
 !/screenshots/synthwave-theme.jpg
 !/streamtuner_ng/__init__.py
 !/streamtuner_ng/__main__.py
+!/streamtuner_ng/compat.py
 !/streamtuner_ng/assets/logo.ico
 !/streamtuner_ng/assets/logo.png
 !/streamtuner_ng/assets/wallpapers/vaporwave-1.jpg

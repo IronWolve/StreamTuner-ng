@@ -58,6 +58,8 @@ class MainWindow(QMainWindow):
         self._load_cancel = threading.Event()
         self._play_cancel = threading.Event()
         self._icon_cancel = threading.Event()
+        self._local_add_pending = False
+        self._local_add_state = None
         self._cache_events = {}
         self._cache_generation = 0
         self._icon_epoch = 0
@@ -157,9 +159,14 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         self.act_reload = QAction("Reload", self, triggered=self._reload)
         self.act_fav = QAction("★ Favorite", self, checkable=True, triggered=self._toggle_favourite)
+        self.act_add_local = QAction("Add station…", self, triggered=self._add_local)
+        self.act_add_local.setShortcut("Ctrl+N")
+        self.act_add_local.setToolTip("Add one or more direct stream URLs to Local")
+        self.act_add_local.setStatusTip("Save a stream URL in your Local station list")
         self.act_play = QAction("Play", self, triggered=self._play_selected)
         self.act_stop = QAction("Stop", self, triggered=self._stop)
         tb.addAction(self.act_reload)
+        tb.addAction(self.act_add_local)
         tb.addAction(self.act_fav)
         tb.addSeparator()                       # | between Favorite and the transport
         tb.addWidget(QLabel(" Search: "))
@@ -439,7 +446,7 @@ class MainWindow(QMainWindow):
             mb.setNativeMenuBar(False)
         m_file = mb.addMenu("&File")
         m_file.addAction(QAction("Open Location…", self, shortcut="Ctrl+L", triggered=self._open_location))
-        m_file.addAction(QAction("New Local Station…", self, triggered=self._add_local))
+        m_file.addAction(self.act_add_local)
         m_file.addSeparator()
         m_file.addAction(QAction("Quit", self, shortcut="Ctrl+Q", triggered=self._quit))
 
@@ -1800,6 +1807,9 @@ class MainWindow(QMainWindow):
         app.setFont(f)
         app.setPalette(theme.palette(mode))                              # keep OS dark-mode from bleeding in
         app.setStyleSheet(theme.stylesheet(mode, translucent=bool(spec), font_family=fam, font_px=px))
+        tray = getattr(self, "_tray", None)
+        if tray is not None and hasattr(tray.contextMenu(), "refresh"):
+            tray.contextMenu().refresh()
         self._apply_wallpaper(spec)
 
     def _apply_wallpaper(self, spec: str) -> None:
@@ -2198,18 +2208,124 @@ class MainWindow(QMainWindow):
         self._start_playback({"title": redact_url(url), "url": url}, None, self._play_gen)
 
     def _add_local(self) -> None:
-        from .dialogs import new_station
+        from .dialogs import MAX_LOCAL_BATCH_URLS, new_station
+        if self._closing or self._local_add_pending:
+            return
         result = new_station(self, self.config.get("theme", "dark"))
         if not result:
             return
-        name, url = result
         local = self.host.channels.get("local")
-        if local:
-            try:
-                local.add(name or redact_url(url), url)
-                self.statusBar().showMessage(f"Added {name or redact_url(url)} to Local")
-            except ValueError:
-                self._status_error("A supported network stream URL is required")
+        if local is None:
+            self._status_error("The Local station list is unavailable")
+            return
+        if not isinstance(result, dict) or type(result.get("bulk")) is not bool:
+            self._status_error("Station details were incomplete; nothing was saved")
+            return
+        urls = result.get("urls")
+        if (not isinstance(urls, list) or not urls
+                or any(not isinstance(url, str) or not valid_url(url, token=True) for url in urls)):
+            self._status_error("A stream URL was invalid; nothing was saved")
+            return
+        if result["bulk"] and len(urls) > MAX_LOCAL_BATCH_URLS:
+            self._status_error(f"A batch can contain at most {MAX_LOCAL_BATCH_URLS:,} URLs; nothing was saved")
+            return
+
+        if result["bulk"]:
+            rows = [{"title": redact_url(url), "url": url} for url in urls]
+            self._start_local_batch(local, rows)
+            return
+        if len(urls) != 1:
+            self._status_error("Enter one URL for a single station; nothing was saved")
+            return
+        name = result.get("name", "")
+        if not isinstance(name, str):
+            self._status_error("Station name was invalid; nothing was saved")
+            return
+        try:
+            row = local.add(name.strip() or redact_url(urls[0]), urls[0])
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._status_error(f"Could not save to Local: {self.config.redact(exc)}")
+            return
+        self._show_local_after_add(f"Saved {row['title']} to Local")
+
+    def _start_local_batch(self, local, rows: list[dict]) -> None:
+        if self._closing or self._local_add_pending:
+            return
+        state = {"local": local, "rows": rows, "attempts": 0, "cancel": threading.Event()}
+        self._local_add_pending = True
+        self._local_add_state = state
+        self.act_add_local.setEnabled(False)
+        self.statusBar().showMessage(f"Preparing {len(rows):,} stream URLs for Local…")
+        self._prepare_local_batch(state)
+
+    def _prepare_local_batch(self, state) -> None:
+        if self._closing or state["cancel"].is_set() or self._local_add_state is not state:
+            return
+        local, rows = state["local"], state["rows"]
+        run_io(lambda: local.prepare_many(rows), self._on_local_batch_prepared,
+               cancelled=state["cancel"])
+
+    def _on_local_batch_prepared(self, result) -> None:
+        state = self._local_add_state
+        if self._closing or not self._local_add_pending or state is None:
+            return
+        if isinstance(result, BaseException):
+            self._finish_local_batch(state, error=f"Could not prepare Local stations: {self.config.redact(result)}")
+            return
+        local = state["local"]
+        if not local.plan_is_current(result):
+            self._replan_local_batch(state)
+            return
+        try:
+            applied = local.apply_many_plan(result)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._finish_local_batch(state, error=f"Could not save to Local: {self.config.redact(exc)}")
+            return
+        if not applied:
+            self._replan_local_batch(state)
+            return
+        added = result.stations_added
+        message = (f"Added {added} station{'s' if added != 1 else ''} to Local"
+                   if added else "No new stations added; those stream URLs are already in Local")
+        self._finish_local_batch(state, message=message)
+
+    def _replan_local_batch(self, state) -> None:
+        if state["attempts"] >= 4:
+            self._finish_local_batch(
+                state, error="Local stations changed repeatedly during this batch; nothing was saved. Try again.")
+            return
+        state["attempts"] += 1
+        self.statusBar().showMessage("Local stations changed; rechecking the batch…")
+        self._prepare_local_batch(state)
+
+    def _finish_local_batch(self, state, *, message: str = "", error: str = "") -> None:
+        if self._local_add_state is not state:
+            return
+        self._local_add_state = None
+        self._local_add_pending = False
+        if not self._closing:
+            self.act_add_local.setEnabled(True)
+        if error:
+            self._status_error(error)
+            return
+        if message:
+            self._show_local_after_add(message)
+
+    def _show_local_after_add(self, message: str) -> None:
+        # Local rows are authoritative in memory; discard any stale view state and
+        # return to the list so the user sees the saved or deduplicated result.
+        self._clear_channel_cache("local")
+        item = next((self.channels.item(index) for index in range(self.channels.count())
+                     if self.channels.item(index).data(Qt.UserRole) == "local"), None)
+        if item is None:
+            self._status_error("Stations were saved, but the Local view is unavailable")
+            return
+        current = self.channels.currentItem()
+        if current is not None and current.data(Qt.UserRole) == "local":
+            self._fill_categories("local", ["My Stations"], preferred="My Stations")
+        else:
+            self.channels.setCurrentItem(item)
+        self.statusBar().showMessage(message, 5000)
 
     def _open_plugins_folder(self) -> None:
         from PySide6.QtCore import QUrl
@@ -2692,6 +2808,9 @@ class MainWindow(QMainWindow):
                 self._status_error("Changes are not saved yet. Keep this window open and retry closing after storage is available.")
                 return
         self._closing = True
+        local_add = self._local_add_state
+        if local_add is not None:
+            local_add["cancel"].set()
         if hasattr(self, "_import_cancel"):
             self._import_cancel.set()
         for cancel in tuple(getattr(self, "_export_cancels", ())):

@@ -70,7 +70,7 @@ Personalize the app and manage your saved data from these controls:
 | **Themes** | **Options → Themes**: select a theme, choose a wallpaper, or import/export a custom theme |
 | **Colors** | **View → Colors**: hover to preview a palette, then click to apply |
 | **Plugins** | **Tools → Open Plugins Folder**: copy `_example.py` to a new filename, edit it, and restart |
-| **Local stations** | **File → New Local Station**: save a supported network stream URL |
+| **Local stations** | **Add station…** on the toolbar or **Ctrl+N**: save a named stream or paste several URLs, one per line; find them under **Local → My Stations** |
 | **Backup & cache** | **Options → Cache & Data**: manage caches, choose station-icon storage, and export/import settings and saved lists |
 | **Your data** | Linux/macOS: `~/.config/streamtuner-ng/`, or your configured XDG location. Windows: `%APPDATA%\streamtuner-ng\` |
 

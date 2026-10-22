@@ -312,7 +312,7 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QListWidget::item {{ padding: 6px 8px; }}
     QListWidget::item:selected {{ background: {on}; color: {on_text}; }}
 
-    QLineEdit {{
+    QLineEdit, QPlainTextEdit {{
         background: {panel}; color: {text}; border: 1px solid {bg};
         border-radius: 6px; padding: 5px 8px;
     }}

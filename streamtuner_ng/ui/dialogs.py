@@ -12,11 +12,12 @@ from ..security import redact_url, valid_url
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QApplication, QCheckBox, QDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
 BORDER = "rgb(120,120,120)"   # the standard grey border for boxes
+MAX_LOCAL_BATCH_URLS = 1000
 
 
 def _card_colors(mode: str) -> tuple[str, str]:
@@ -76,31 +77,99 @@ class StyledDialog(QDialog):
 
 
 def new_station(parent, mode: str):
-    """Styled 'New Local Station' dialog. Returns (name, url) or None."""
-    dlg = StyledDialog(parent, "New Local Station", mode)
+    """Collect one named stream or a newline-separated batch for Local."""
+    dlg = StyledDialog(parent, "Add Stations to Local", mode)
+    dlg.card.setMinimumWidth(480)
     name = QLineEdit()
+    name.setObjectName("localStationName")
     name.setPlaceholderText("Name")
+    name_label = QLabel("Name (optional)")
+    name_label.setBuddy(name)
     url = QLineEdit()
-    url.setPlaceholderText("Stream URL  (http://… .mp3 / .pls / .m3u)")
+    url.setObjectName("localStationUrl")
+    url.setAccessibleName("Direct stream URL")
+    url.setPlaceholderText("https://radio.example/live.mp3")
+    url_label = QLabel("Stream URL")
+    url_label.setBuddy(url)
+    batch_toggle = QCheckBox("Add multiple URLs")
+    batch_toggle.setObjectName("localStationBatchToggle")
+    batch_toggle.setToolTip("Paste one direct stream URL per line")
+    batch_label = QLabel("Enter the actual stream URL, not the station or website page.")
+    batch_label.setWordWrap(True)
+    batch_urls = QPlainTextEdit()
+    batch_urls.setObjectName("localStationBatchUrls")
+    batch_urls.setAccessibleName("Direct stream URLs, one per line")
+    batch_label.setBuddy(batch_urls)
+    batch_urls.setPlaceholderText("https://radio.example/live.mp3\nhttps://another.example/stream")
+    batch_urls.setMinimumHeight(190)
+    # Keep the optional single-station name above its field, while leaving the
+    # bulk editor room for pasted lists.
+    dlg.body.addWidget(name_label)
     dlg.body.addWidget(name)
+    dlg.body.addWidget(url_label)
     dlg.body.addWidget(url)
+    dlg.body.addWidget(batch_toggle)
+    dlg.body.addWidget(batch_label)
+    dlg.body.addWidget(batch_urls)
+    for label in (name_label, url_label, batch_label):
+        label.setStyleSheet(f"color:{dlg.text_col};")
+    batch_urls.hide()
     ok, cancel = QPushButton("Add"), QPushButton("Cancel")
+    ok.setObjectName("localStationAdd")
+    cancel.setObjectName("localStationCancel")
+    ok.setDefault(True)
     problem = QLabel()
     problem.setTextFormat(Qt.PlainText)
+    problem.setWordWrap(True)
+    problem.setStyleSheet(f"color:{dlg.text_col};")
     dlg.body.addWidget(problem)
 
+    def set_mode(is_batch: bool) -> None:
+        name_label.setVisible(not is_batch)
+        name.setVisible(not is_batch)
+        url_label.setVisible(not is_batch)
+        url.setVisible(not is_batch)
+        batch_label.setText("Paste actual stream URLs, one per line (not station or website pages)."
+                            if is_batch else "Enter the actual stream URL, not the station or website page.")
+        batch_urls.setVisible(is_batch)
+
+    batch_toggle.toggled.connect(set_mode)
+
     def submit():
-        if valid_url(url.text().strip(), token=True):
-            dlg.accept()
+        problem.clear()
+        if batch_toggle.isChecked():
+            lines = [(number, line.strip()) for number, line in enumerate(batch_urls.toPlainText().splitlines(), 1)
+                     if line.strip()]
+            if not lines:
+                problem.setText("Paste at least one direct stream URL.")
+                batch_urls.setFocus()
+                return
+            if len(lines) > MAX_LOCAL_BATCH_URLS:
+                problem.setText(f"You can add up to {MAX_LOCAL_BATCH_URLS:,} stream URLs at once.")
+                batch_urls.setFocus()
+                return
+            invalid = next((number for number, value in lines if not valid_url(value, token=True)), None)
+            if invalid is not None:
+                problem.setText(f"Line {invalid} is not a supported stream URL. Invalid lists are not saved.")
+                batch_urls.setFocus()
+                return
+            dlg.station_input = {"bulk": True, "name": "", "urls": [value for _number, value in lines]}
         else:
-            problem.setText("Enter a supported HTTP(S), ICY or MMSH network stream URL.")
+            value = url.text().strip()
+            if not valid_url(value, token=True):
+                problem.setText("Enter a direct HTTP(S), ICY or MMSH stream URL, not a station website page.")
+                url.setFocus()
+                return
+            dlg.station_input = {"bulk": False, "name": name.text().strip(), "urls": [value]}
+        dlg.accept()
 
     ok.clicked.connect(submit)
     cancel.clicked.connect(dlg.reject)
     url.returnPressed.connect(submit)
+    batch_urls.setTabChangesFocus(True)
     dlg.add_buttons(cancel, ok)
-    if dlg.exec() and url.text().strip():
-        return name.text().strip(), url.text().strip()
+    if dlg.exec():
+        return getattr(dlg, "station_input", None)
     return None
 
 

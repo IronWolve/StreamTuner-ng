@@ -27,6 +27,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(f"{APP_NAME} {__version__}")
         return 0
+    if not args.selftest or args.gui_smoke:
+        from .compat import qt_startup_error
+        problem = qt_startup_error()
+        if problem:
+            if sys.stderr is not None:
+                print(problem, file=sys.stderr)
+            return 2
     if args.selftest:
         from .selftest import run_selftest
         return run_selftest(network=args.network, gui=args.gui_smoke, engine=args.engine_check, report=args.selftest_report)

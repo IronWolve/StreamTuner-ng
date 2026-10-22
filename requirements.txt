@@ -1,5 +1,7 @@
-# Runtime dependencies pinned for the 1.3 release.
-PySide6_Essentials==6.11.2
+# Linux on Python 3.10–3.13 retains Qt's older x86-64 CPU compatibility.
+# Qt 6.9.3 does not support Python 3.14; newer Python uses the newer Qt wheels.
+PySide6_Essentials==6.9.3; sys_platform == "linux" and python_version < "3.14"
+PySide6_Essentials==6.11.2; sys_platform != "linux" or python_version >= "3.14"
 python-mpv==1.0.8
 requests==2.34.2
 urllib3==2.7.0
