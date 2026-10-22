@@ -4,6 +4,7 @@ PySide6_Essentials==6.9.3; sys_platform == "linux" and python_version < "3.14"
 PySide6_Essentials==6.11.2; sys_platform != "linux" or python_version >= "3.14"
 python-mpv==1.0.8
 requests==2.34.2
+certifi==2026.7.22
 urllib3==2.7.0
 pypresence==4.6.2
 keyring==25.7.0

@@ -81,9 +81,12 @@ class Player:
             import mpv  # python-mpv -> libmpv via ctypes
             opts = dict(video=False, idle=True, cache=True,
                         config=False, load_unsafe_playlists=False,
+                        tls_verify=True,
                         demuxer_max_bytes="8MiB",
                         network_timeout=15)        # dead/stalled streams fail fast — no infinite hang
             if sys.platform.startswith("linux"):
+                import certifi
+                opts["tls_ca_file"] = certifi.where()
                 # prefer PulseAudio on Linux/WSLg: works via pipewire-pulse and dodges the noisy
                 # libpipewire "can't load client.conf" init; falls back to pipewire/alsa if absent.
                 opts["ao"] = "pulse,pipewire,alsa"
