@@ -27,6 +27,18 @@ A cross-platform internet-radio browser inspired by StreamTuner2, built with PyS
 
 Browse by genre, search supported directories, and save your favorite stations. Customize the look with themes, color palettes, and wallpapers, or add your own Python providers.
 
+## Platforms
+
+Ready-to-run packages are available on the [Releases page](https://github.com/IronWolve/StreamTuner-ng/releases).
+
+| Platform | Package | Requirements |
+| :-- | :-- | :-- |
+| **Linux** | x64 AppImage | glibc 2.35 or newer; Ubuntu 22.04 baseline |
+| **Windows** | x64 application | Windows 10 (1809 or later) or Windows 11 |
+| **macOS** | Apple silicon application | macOS 15 or newer |
+
+The Linux AppImage includes its playback engine and Python runtime. Keep your custom `plugins/` folder beside the AppImage when updating.
+
 ## Features
 
 Browse the built-in directories alongside your **Favorites** and **Local** station lists:
@@ -53,6 +65,7 @@ Playback, browsing, and customization features include:
 
 - **Search scopes**: Choose **Loaded list** to filter as you type, or **This source** / **All sources** to search supported catalogs with **Enter** or **Search**. Results arrive progressively, with a clear way back to your category.
 - **Favorites & history**: Save stations, export favorites and station history as CSV, or import CSV into Favorites. Use JSON backups to restore settings and saved lists.
+- **Your own streams**: Use **Add station…** or **Ctrl+N** to save a named stream or paste multiple URLs, one per line. Find them under **Local → My Stations**; no plugin is needed.
 - **Twenty classic themes + your own**: Dark, Light, Dracula, Nord, Solarized (light and dark), Gruvbox (dark and light), Tokyo Night, Monokai Pro, Dark Pastels, Cyberpunk Neon, Ubuntu, xterm, Amber, Green Phosphor, White Phosphor, CGA, CRT, and Synthwave. Import or export custom JSON themes with the [theme guide](THEME-HOWTO.md).
 - **Wallpapers**: Choose the Synthwave grid, either Vaporwave background, or your own image under **Options → Themes → Wallpaper**. Adjust the dim slider to keep station lists readable.
 - **Colors**: Choose from 47 BS-Notepad palettes under **View → Colors**. Hover to preview a color card; click to apply and save. Your current theme stays unchanged until you click.
