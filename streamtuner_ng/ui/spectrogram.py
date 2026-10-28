@@ -86,6 +86,14 @@ class Spectrogram(QWidget):
             return 0.0
         return max(0.0, min(1.0, (db - self._FLOOR_DB) / (-self._FLOOR_DB)))
 
+    def reset(self) -> None:
+        """Clear old history without keeping a stopped visualization timer alive."""
+        if self._idle_columns < self.HISTORY:
+            self._img.fill(0)
+            self._idle_columns = self.HISTORY
+            self._t = 0
+            self.update()
+
     # ---- paint ----
     def paintEvent(self, _e) -> None:
         p = QPainter(self)

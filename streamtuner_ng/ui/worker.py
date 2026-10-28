@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import itertools
+import heapq
 from concurrent.futures import CancelledError
 from typing import Callable
 
@@ -71,22 +72,37 @@ class _Pool:
     def submit(self, fn, delivery, priority=0, cancelled=None, key=None):
         external_cancelled = cancelled
         superseded = threading.Event()
-        if key is not None:
-            with self._key_lock:
-                previous = self._pending_keys.get(key)
-                if previous is not None:
-                    previous.set()             # obsolete queued work is skipped when dequeued
-                self._pending_keys[key] = superseded
-        try:
-            self._queue.put_nowait((int(priority), next(self._sequence), fn, delivery,
-                                    superseded, external_cancelled, key))
-        except queue.Full:
+        item = (int(priority), next(self._sequence), fn, delivery,
+                superseded, external_cancelled, key)
+        replaced = None
+        admitted = False
+        # Replace a queued keyed job in place. Merely marking old jobs cancelled
+        # leaves tombstones that can fill the queue and reject the newest save.
+        with self._key_lock:
+            with self._queue.not_full:
+                index = next((i for i, queued in enumerate(self._queue.queue)
+                              if key is not None and queued[6] == key), None)
+                if index is not None:
+                    replaced = self._queue.queue[index]
+                    self._queue.queue[index] = item
+                    heapq.heapify(self._queue.queue)
+                    admitted = True  # one unfinished job replaces another
+                elif self._queue._qsize() < self._queue.maxsize:
+                    self._queue._put(item)
+                    self._queue.unfinished_tasks += 1
+                    admitted = True
+                if admitted:
+                    if key is not None:
+                        previous = self._pending_keys.get(key)
+                        if previous is not None:
+                            previous.set()
+                        self._pending_keys[key] = superseded
+                    self._queue.not_empty.notify()
+        if not admitted:
             delivery.done.emit(TimeoutError('Background queue is full; try again shortly'))
-            if key is not None:
-                with self._key_lock:
-                    if self._pending_keys.get(key) is superseded:
-                        self._pending_keys.pop(key, None)
             return
+        if replaced is not None:
+            replaced[3].done.emit(CancelledError())
         self._ensure_workers()
 
     def _run(self):
@@ -122,6 +138,7 @@ _default_pool = None
 _playback_pool = None
 _io_pool = None
 _cache_pool = None
+_credentials_pool = None
 _io_threads = 4
 
 
@@ -158,6 +175,14 @@ def run_cache(fn: Callable, on_done: Callable, key=None,
     if _cache_pool is None:
         _cache_pool = _Pool(1, 'cache')
     _cache_pool.submit(fn, _Delivery(on_done), priority=0, cancelled=cancelled, key=key)
+
+
+def run_credentials(fn: Callable, on_done: Callable) -> None:
+    """Keep accepted credential reads/writes ordered across dialogs off the GUI."""
+    global _credentials_pool
+    if _credentials_pool is None:
+        _credentials_pool = _Pool(1, 'credentials')
+    _credentials_pool.submit(fn, _Delivery(on_done), priority=0)
 
 
 def drain_cache(timeout: float = 5.0) -> bool:

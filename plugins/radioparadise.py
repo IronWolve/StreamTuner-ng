@@ -51,7 +51,7 @@ class RadioParadise(Channel):
             if not slug:
                 continue
             is_main = str(c.get("chan")) == "0"
-            listeners = int(c.get("current_listeners") or 0)
+            listeners = c.get("current_listeners") or 0  # safely normalized by the host
             for label, mime, q in QUALITIES:
                 if slug == "serenity" and q not in SERENITY_ONLY:
                     continue

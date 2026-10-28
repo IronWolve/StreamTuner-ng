@@ -83,7 +83,7 @@ class SomaFM(Channel):
                 favicon=c.get("image", ""),
                 genre=genre,
                 description=c.get("description", ""),   # SomaFM tagline, not a song
-                listeners=int(c.get("listeners") or 0),
+                listeners=c.get("listeners") or 0,  # normalized safely at the host boundary
                 format=mime,
                 listformat="pls",
             ))

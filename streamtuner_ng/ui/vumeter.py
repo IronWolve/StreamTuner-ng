@@ -54,6 +54,12 @@ class VuMeter(QWidget):
         self._rpk = max(0.0, self._rpk - 0.03)
         self.update()
 
+    def reset(self) -> None:
+        """Clear held levels when the window suspends visualization polling."""
+        if self._l or self._r or self._lpk or self._rpk:
+            self._l = self._r = self._lpk = self._rpk = 0.0
+            self.update()
+
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         w, h = self.width(), self.height()

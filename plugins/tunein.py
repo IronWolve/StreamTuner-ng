@@ -95,7 +95,7 @@ class TuneIn(Channel):
                 title=html.unescape(a.get("text", "")),
                 url=u,
                 description=html.unescape(a.get("subtext", "")),   # subtext = slogan/show, not a song
-                bitrate=int(a.get("bitrate") or 0),
+                bitrate=a.get("bitrate") or 0,  # the host safely normalizes optional numeric fields
                 format=_FMT.get(fmt, "audio/mpeg"),
                 favicon=html.unescape(a.get("image", "")),
                 listformat="tunein",

@@ -62,6 +62,7 @@ def run_app() -> int:
     _mode = config.get("theme", "dark")
     _ffam, _fpx = app_font(config)         # app-wide font (Segoe UI default on Windows; user-settable)
     _font = app.font()
+    app._streamtuner_default_font_family = _font.family()
     if _ffam:
         _font.setFamily(_ffam)
     _font.setPixelSize(_fpx)

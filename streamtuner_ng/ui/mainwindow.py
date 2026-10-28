@@ -25,7 +25,7 @@ from . import theme
 from .models import COLUMNS, FILTER_ROLE, SORT_ROLE, StationModel
 from .spectrogram import Spectrogram
 from .vumeter import VuMeter
-from .worker import run_async, run_io, run_cache, run_playback
+from .worker import run_async, run_io, run_cache, run_playback, run_credentials
 from .cache import CatalogCache
 
 
@@ -48,6 +48,12 @@ class MainWindow(QMainWindow):
         self._play_gen = 0
         self._play_started_at = 0.0
         self._closing = False
+        self._close_waiting = False
+        self._close_timer = QTimer(self)
+        self._close_timer.setSingleShot(True)
+        self._close_timer.timeout.connect(self.close)
+        self._secret_saves = set()
+        self._secret_edit_pending = set()
         self._load_gen = 0           # bumps each category change; stale pages ignored
         self._channel_gen = 0
         self._view_search = False
@@ -80,7 +86,6 @@ class MainWindow(QMainWindow):
         self._collapsed = set(self.config.get("collapsed_groups", []) or [])
         self._cache = CatalogCache()   # (channel, category) -> full station list
         self._cat_cache: dict[str, list] = {}  # channel -> category list (cached on first visit)
-        self._aa_key = (self.config.get("audioaddict_listen_key", "") or "").strip()  # detect key changes
         self._favicons: dict[str, str] = {}   # channel id -> cached favicon path
         self._svc_icons: dict = {}            # channel id -> QIcon, generic fallback for icon-less rows
         self._station_icons = OrderedDict()        # station favicon URL -> QIcon (None = in-flight)
@@ -655,7 +660,10 @@ class MainWindow(QMainWindow):
                 self._add_channel_option(menu, opt)
         menu.addAction("Options…", self._open_options)
         menu.addAction("Refresh Icon", lambda: self._refresh_favicon(cid))
-        menu.exec(self.channels.mapToGlobal(pos))
+        try:
+            menu.exec(self.channels.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
 
     def _add_channel_option(self, menu, opt) -> None:
         """Render one entry from a channel's options_spec into the right-click menu.
@@ -675,8 +683,7 @@ class MainWindow(QMainWindow):
                 grp.addAction(a)
                 sub.addAction(a)
         elif typ == "secret":
-            verb = "Change" if (self.config.get(key, "") or "") else "Set"
-            menu.addAction(f"{verb} {label}…",
+            menu.addAction(f"Set / change {label}…",
                            lambda k=key, lb=label, ph=opt.get("placeholder", ""): self._edit_channel_secret(k, lb, ph))
 
     def _set_channel_option(self, key: str, value, label: str = "") -> None:
@@ -686,12 +693,49 @@ class MainWindow(QMainWindow):
 
     def _edit_channel_secret(self, key: str, label: str, placeholder: str = "") -> None:
         from PySide6.QtWidgets import QInputDialog, QLineEdit
-        cur = self.config.get(key, "") or ""
-        text, ok = QInputDialog.getText(self, label, f"{label}:", QLineEdit.Password, cur)
-        if ok:
-            self.config.set(key, text.strip())
-            self.config.save_settings()
-            self.statusBar().showMessage(f"{label} saved", 3000)
+        if key in self._secret_edit_pending or self._closing:
+            return
+        self._secret_edit_pending.add(key)
+        self.statusBar().showMessage(f"Loading {label}…")
+
+        def loaded(current):
+            if self._closing:
+                self._secret_edit_pending.discard(key)
+                return
+            if isinstance(current, BaseException):
+                self._secret_edit_pending.discard(key)
+                self._status_error(f"Could not load {label}")
+                return
+            text, ok = QInputDialog.getText(self, label, f"{label}:", QLineEdit.Password,
+                                            current or "")
+            if not ok:
+                self._secret_edit_pending.discard(key)
+                return
+            completed = threading.Event()
+            self._secret_saves.add(completed)
+            self.statusBar().showMessage(f"Saving {label}…")
+
+            def save():
+                try:
+                    self.config.set(key, text.strip())
+                    self.config.save_settings()
+                finally:
+                    completed.set()
+
+            def saved(result):
+                completed.set()  # queue rejection also completes the operation
+                self._secret_saves.discard(completed)
+                self._secret_edit_pending.discard(key)
+                if self._closing:
+                    return
+                if isinstance(result, BaseException):
+                    self._status_error(f"Could not save {label}; please retry")
+                else:
+                    self.statusBar().showMessage(f"{label} saved", 3000)
+
+            run_credentials(save, saved)
+
+        run_credentials(lambda: self.config.get(key, ""), loaded)
 
     def _export_rows(self, rows, suggested: str) -> None:
         """Save a stable station-list snapshot to CSV without blocking the UI."""
@@ -986,11 +1030,15 @@ class MainWindow(QMainWindow):
             self._fetch_categories(cid, generation)
         else:
             self.categories.addItem("Loading…")
+            view_generation = self._load_gen
             run_cache(lambda: self.config.cache_load(cid, "__categories__"),
-                      lambda result: self._on_cached_categories(cid, generation, result))
+                      lambda result: self._on_cached_categories(cid, generation, result,
+                                                                view_generation))
 
-    def _on_cached_categories(self, cid, generation, cached) -> None:
+    def _on_cached_categories(self, cid, generation, cached, view_generation=None) -> None:
         if self._closing or cid != self.current_channel or generation != self._channel_gen:
+            return
+        if view_generation is not None and view_generation != self._load_gen:
             return
         if isinstance(cached, tuple) and cached[0]:
             self._cat_cache[cid] = cached[0]
@@ -1004,15 +1052,20 @@ class MainWindow(QMainWindow):
     def _fetch_categories(self, cid, generation, preferred=None, fresh=False) -> None:
         operation = "refresh_categories" if fresh else "update_categories"
         cancel = self._load_cancel
+        view_generation = self._load_gen
         run_async(lambda: self.host.call(cid, operation, timeout=45, cancel_event=cancel),
-                  lambda result: self._on_categories(cid, result, generation, preferred, fresh),
+                  lambda result: self._on_categories(cid, result, generation, preferred, fresh,
+                                                     view_generation),
                   cancelled=cancel)
 
 
-    def _on_categories(self, cid: str, result, generation=None, preferred=None, fresh=False) -> None:
+    def _on_categories(self, cid: str, result, generation=None, preferred=None, fresh=False,
+                       view_generation=None) -> None:
         if self._closing or cid != self.current_channel:
             return
         if generation is not None and generation != self._channel_gen:
+            return
+        if view_generation is not None and view_generation != self._load_gen:
             return
         self._refresh_dot(cid)
         if isinstance(result, Result) and result.ok and result.data:
@@ -1025,7 +1078,13 @@ class MainWindow(QMainWindow):
                 run_cache(lambda: self.config.cache_save(cid, "__categories__", cats), lambda *_: None,
                           key=(cid, "__categories__"), cancelled=cancel)
             if not unchanged or fresh:
-                self._fill_categories(cid, cats, preferred=preferred, fresh=fresh)
+                derived = self.current_category == getattr(self.host.channels.get(cid), "listeners_category", None)
+                preserve_view = (not fresh and bool(self.current_category)
+                                 and (self.current_category in cats or derived)
+                                 and self.categories.count() > 0)
+                self._fill_categories(cid, cats,
+                                      preferred=self.current_category if preserve_view else preferred,
+                                      fresh=fresh, preserve_view=preserve_view)
         else:
             self._refreshing = False
             msg = result.message if isinstance(result, Result) else str(result)
@@ -1034,7 +1093,8 @@ class MainWindow(QMainWindow):
             self._retry_button.show()
             self._cancel_button.hide()
 
-    def _fill_categories(self, cid: str, cats: list, preferred=None, fresh=False) -> None:
+    def _fill_categories(self, cid: str, cats: list, preferred=None, fresh=False,
+                         preserve_view=False) -> None:
         ch = self.host.channels.get(cid)
         cats = list(cats)
         if getattr(ch, "category_sort", True):
@@ -1052,7 +1112,8 @@ class MainWindow(QMainWindow):
             self.categories.setCurrentRow(cats.index(preferred) if preferred in cats else 0)
         finally:
             self.categories.blockSignals(False)
-        self._on_category(self.categories.currentItem(), None, fresh=fresh)
+        if not preserve_view:
+            self._on_category(self.categories.currentItem(), None, fresh=fresh)
 
     def _on_category(self, cur, _prev, fresh=False) -> None:
         if self._closing or not cur or cur.text() == "Loading…":
@@ -1090,16 +1151,16 @@ class MainWindow(QMainWindow):
             return
         if isinstance(disk, tuple):
             cached, age = disk
-            self._cache.put((cid, cat), cached, age=age)
+            admitted = self._cache.put((cid, cat), cached, age=age)
             self._update_cache_label()
-            self._show_cached_rows(cid, cat, cached)
+            self._show_cached_rows(cid, cat, cached, merge_all=admitted)
             if age > self._CACHE_STALE_S:
                 self._bg_refresh(cid, cat)
         else:
             self._begin_load(cid, cat, gen)
 
-    def _show_cached_rows(self, cid, cat, cached) -> None:
-        rows = self._union(cid) if self._is_all(cid, cat) else cached
+    def _show_cached_rows(self, cid, cat, cached, *, merge_all=True) -> None:
+        rows = self._union(cid) if merge_all and self._is_all(cid, cat) else cached
         self.model.set_rows(rows, validated=True)
         self._apply_column_visibility()
         self._load_station_favicons()
@@ -1111,7 +1172,7 @@ class MainWindow(QMainWindow):
         self._load_errors = []
         self._fresh_rows = []
         self._fresh_seen = set()
-        self._pending_restore = self._view_position() if self._retain_during_load else None
+        self._pending_restore = None
         if not self._retain_during_load:
             self.model.set_rows([])
         self._list_message(f"Refreshing {cat} — showing saved stations" if self._retain_during_load
@@ -1147,10 +1208,11 @@ class MainWindow(QMainWindow):
             first = getattr(ch, "page_size", None) or self.ALL_LIMIT
             self._load_page(cid, all_cat, 0, first, gen)   # _finish_load filters when it completes
 
-    def _render_listeners(self, cid: str) -> None:
-        rows = [r for r in self._union(cid) if (r.get("listeners") or 0) > 0]
+    def _render_listeners(self, cid: str, rows=None) -> None:
+        rows = [r for r in (self._union(cid) if rows is None else rows)
+                if (r.get("listeners") or 0) > 0]
         rows.sort(key=lambda r: r.get("listeners") or 0, reverse=True)
-        self.model.set_rows(rows)
+        self.model.set_rows(rows, validated=True)
         self._apply_column_visibility()
         self._load_station_favicons()
         self.statusBar().showMessage(f"{len(rows):,} stations with listeners")
@@ -1211,7 +1273,6 @@ class MainWindow(QMainWindow):
                     self._load_errors.append("Display limit reached; narrow the category or search")
                 self._load_started = True
             self._apply_column_visibility()
-            self._restore_view_position(self._pending_restore)
         more, next_offset = self._page_continuation(ch, cat, offset, result)
         loaded_count = len(self._fresh_rows) if self._retain_during_load else self.model.rowCount()
         if more and loaded_count < self.ALL_LIMIT:
@@ -1254,7 +1315,7 @@ class MainWindow(QMainWindow):
         self._update_cache_label()
         self._load_station_favicons()
         if cat == getattr(ch, "all_category", "") and self.current_category == getattr(ch, "listeners_category", ""):
-            self._render_listeners(cid)
+            self._render_listeners(cid, rows=rows if complete else None)
 
 
     def _is_all(self, cid: str, cat: str) -> bool:
@@ -1314,13 +1375,15 @@ class MainWindow(QMainWindow):
         row = self.model.row_at(self.proxy.mapToSource(idx).row())
         if not row:
             return
+        row = dict(row)
+        row.setdefault("_source", self._resolve_source(row))
         from PySide6.QtWidgets import QApplication, QMenu
         menu = QMenu(self)
-        menu.addAction("Play", lambda: (self.table.setCurrentIndex(idx), self._play_selected()))
+        menu.addAction("Play", lambda: self._play_row(row))
         bm = self.host.channels.get("bookmarks")
         fav = bool(bm and bm.is_favourite(row.get("url", "")))
         menu.addAction("Remove favorite" if fav else "★ Favorite",
-                       lambda: (self.table.setCurrentIndex(idx), self._toggle_favourite()))
+                       lambda: self._toggle_favourite_row(row))
         menu.addSeparator()
         menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(redact_url(row.get("url", ""))))
         menu.addAction("Info…", lambda: self._station_info(row))
@@ -1328,7 +1391,10 @@ class MainWindow(QMainWindow):
         if row.get("homepage"):
             menu.addAction("Open Website",
                            lambda: self._open_website(row["homepage"]))
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+        try:
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
 
     def _station_info(self, row: dict) -> None:
         from .dialogs import station_info
@@ -1350,7 +1416,10 @@ class MainWindow(QMainWindow):
         menu.addAction("Info…", lambda: self._station_info(row))
         if row.get("homepage"):
             menu.addAction("Open Website", lambda: self._open_website(row["homepage"]))
-        menu.exec(self.np_label.mapToGlobal(pos))
+        try:
+            menu.exec(self.np_label.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
 
     def _recache_station_icon(self, row: dict) -> None:
         """Force-refresh this station's art-box icon: clear its cached files and re-fetch the
@@ -1516,7 +1585,9 @@ class MainWindow(QMainWindow):
         self._sync_visualizer()
 
     def _toggle_favourite(self, *_a) -> None:
-        row = self._selected_row()
+        self._toggle_favourite_row(self._selected_row())
+
+    def _toggle_favourite_row(self, row) -> None:
         bm = self.host.channels.get("bookmarks")
         if not row or not bm:
             return
@@ -1527,7 +1598,7 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             self._status_error(self.config.redact(exc))
             return
-        self.act_fav.setChecked(now)
+        self._sync_selection_actions()
         self._cache.pop(("bookmarks", "Favorites"), None)   # the favourites list changed -> stale cache
         if self.current_channel == "bookmarks" and self.current_category == "Favorites" and not now:
             url = row.get("url", "")                          # viewing the list we just edited ->
@@ -1801,8 +1872,9 @@ class MainWindow(QMainWindow):
         spec = self._active_wallpaper_spec(mode)
         fam, px = theme.app_font(self.config)
         f = app.font()
-        if fam:
-            f.setFamily(fam)
+        if not hasattr(app, "_streamtuner_default_font_family"):
+            app._streamtuner_default_font_family = f.family()
+        f.setFamily(fam or app._streamtuner_default_font_family)
         f.setPixelSize(px)
         app.setFont(f)
         app.setPalette(theme.palette(mode))                              # keep OS dark-mode from bleeding in
@@ -2028,7 +2100,8 @@ class MainWindow(QMainWindow):
                 self._stream_label.setText("▶ " + " · ".join(bits) if bits else "▶")
             else:
                 self._stream_label.setText("" if self.player.available else "⚠ no audio engine")
-                if self.btn_play.isChecked() and self._playing_row and time.monotonic() - self._play_started_at > 1:
+                if (not self._pending_play and self.btn_play.isChecked() and self._playing_row
+                        and time.monotonic() - self._play_started_at > 1):
                     failure = getattr(self.player, 'playback_error', '')
                     self._stop()
                     if isinstance(failure, str) and failure:
@@ -2370,13 +2443,6 @@ class MainWindow(QMainWindow):
         self._notifications = bool(self.config.get("notifications", True))
         self.model.refresh_icons()           # flip station icons <-> service logo immediately
         self._apply_tray()                   # tray icon / visibility may have changed
-        # The AudioAddict listen key is baked into every stream URL when the rows load, so a
-        # key change leaves already-loaded networks (e.g. DI.FM) holding stale keyless URLs.
-        # Drop AudioAddict's cache so every network reloads with the new key.
-        key = (self.config.get("audioaddict_listen_key", "") or "").strip()
-        if key != self._aa_key:
-            self._aa_key = key
-            self._refresh_channel_cache("audioaddict")
         if self._discord_enabled():          # just turned on (or new App ID) -> show now if playing
             if self.player.is_playing and self._playing_row:
                 self._discord_update(self._np_full or self._playing_row.get("title", ""),
@@ -2425,7 +2491,7 @@ class MainWindow(QMainWindow):
     def _status_error(self, msg: str) -> None:
         self.statusBar().showMessage("⚠ " + self.config.redact(msg))
 
-    def _save_layout(self) -> None:
+    def _save_layout(self, *, only_if_changed=False) -> None:
         """Persist window size/position + table column widths/order to config."""
         import base64
         try:
@@ -2434,7 +2500,11 @@ class MainWindow(QMainWindow):
             self.config.set("pane_sizes", self._split.sizes())
             self.config.set("column_state",
                             base64.b64encode(self.table.horizontalHeader().saveState().data()).decode("ascii"))
+            snapshot = self.config.settings_snapshot()
+            if only_if_changed and snapshot == getattr(self, "_close_settings_snapshot", None):
+                return
             self.config.save_settings()
+            self._close_settings_snapshot = snapshot
         except Exception:  # noqa: BLE001
             pass
 
@@ -2614,6 +2684,9 @@ class MainWindow(QMainWindow):
         self._fresh_rows = []
         self._fresh_seen = set()
         self._pending_restore = None
+        self._search_pending = set()
+        self._search_failures = {}
+        self._search_acc = {}
         if hasattr(self, "_cancel_button"):
             self._cancel_button.hide()
             self._retry_button.hide()
@@ -2769,8 +2842,8 @@ class MainWindow(QMainWindow):
             self._vu_timer.start(33)
         elif not active and self._vu_timer.isActive():
             self._vu_timer.stop()
-            self.vu.idle()
-            self.spectro.idle()
+            self.vu.reset()
+            self.spectro.reset()
         if hasattr(self.player, "enable_meter") and getattr(self, "_meter_active", None) != active:
             self.player.enable_meter(active)
             self._meter_active = active
@@ -2791,6 +2864,9 @@ class MainWindow(QMainWindow):
             self._sync_visualizer()
 
     def closeEvent(self, e):
+        if self._closing:
+            super().closeEvent(e)
+            return
         tray = getattr(self, "_tray", None)
         if (not getattr(self, "_really_quit", False)
                 and self.config.get("tray_close", False)
@@ -2798,15 +2874,42 @@ class MainWindow(QMainWindow):
             e.ignore()                   # close-to-tray: hide + keep playing; Quit from the tray menu
             self.hide()
             return
-        self._save_layout()
-        if hasattr(self.config, "retry_failed_writes"):
-            self.config.retry_failed_writes()
+        if not self._close_waiting:
+            self._save_layout()
+            if hasattr(self.config, "retry_failed_writes"):
+                self.config.retry_failed_writes()
+            self._close_waiting = True
+            self._close_deadline = time.monotonic() + 5
+        else:
+            # The window stays interactive while storage drains. Capture edits
+            # such as volume/layout that normally save only when closing, while
+            # leaving an unchanged pending snapshot alone on every timer tick.
+            self._save_layout(only_if_changed=True)
+        if any(not event.is_set() for event in self._secret_saves):
+            e.ignore()
+            if time.monotonic() < self._close_deadline:
+                self.statusBar().showMessage("Saving credentials before closing…")
+                self._close_timer.start(50)
+            else:
+                self._close_waiting = False
+                self._close_timer.stop()
+                self._status_error("Credentials are still being saved. Retry closing after storage is available.")
+            return
         if hasattr(self.config, "flush_writes"):
-            drained = self.config.flush_writes(timeout=5)
+            drained = self.config.flush_writes(timeout=0)
             if not drained and getattr(self.config, "has_unsaved_writes", True):
                 e.ignore()
-                self._status_error("Changes are not saved yet. Keep this window open and retry closing after storage is available.")
+                if (getattr(self.config, "has_pending_writes", True)
+                        and time.monotonic() < self._close_deadline):
+                    self.statusBar().showMessage("Saving changes before closing…")
+                    self._close_timer.start(50)
+                else:
+                    self._close_waiting = False
+                    self._close_timer.stop()
+                    self._status_error("Changes are not saved yet. Keep this window open and retry closing after storage is available.")
                 return
+        self._close_waiting = False
+        self._close_timer.stop()
         self._closing = True
         local_add = self._local_add_state
         if local_add is not None:

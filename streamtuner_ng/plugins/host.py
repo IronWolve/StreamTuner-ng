@@ -55,6 +55,7 @@ class _PluginWorkers:
         self.provider_lanes: dict[tuple[object, str], list[int]] = {}
         self.playback_lanes: dict[tuple[object, str], int] = {}
         self.regular_lane_ids: list[int] = []
+        self.playback_lane_ids: list[int] = []
         self.pending = 0
 
     def submit(self, job: _CallJob) -> bool:
@@ -66,7 +67,7 @@ class _PluginWorkers:
             if job.playback:
                 lane = self.playback_lanes.get(lane_key)
                 if lane is None:
-                    available = set(self.playback_lanes.values())
+                    available = self.playback_lane_ids
                     if (len(available) < self.limit - self.regular_limit
                             and len(self.threads) < self.limit):
                         lane = self._new_lane(lane_key, provider_lane=False)
@@ -75,6 +76,15 @@ class _PluginWorkers:
                     else:
                         return False
                     self.playback_lanes[lane_key] = lane
+                elif self.lane_load[lane] > 0:
+                    # Providers may share a reserved lane once both exist.
+                    # Preserve idle affinity, but do not queue a new provider's
+                    # resolver behind a slow sibling while another lane is free.
+                    candidate = min(self.playback_lane_ids,
+                                    key=lambda item: self.lane_load[item])
+                    if self.lane_load[candidate] < self.lane_load[lane]:
+                        lane = candidate
+                        self.playback_lanes[lane_key] = lane
             else:
                 lane = min(lanes, key=lambda item: self.lane_load[item]) if lanes else None
                 # Reuse the provider's idle worker for connection pooling. A
@@ -112,6 +122,8 @@ class _PluginWorkers:
         if provider_lane:
             self.provider_lanes.setdefault(lane_key, []).append(lane)
             self.regular_lane_ids.append(lane)
+        else:
+            self.playback_lane_ids.append(lane)
         thread.start()
         return lane
 

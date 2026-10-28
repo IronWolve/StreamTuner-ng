@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 BORDER = "rgb(120,120,120)"   # the standard grey border for boxes
@@ -65,6 +65,30 @@ class StyledDialog(QDialog):
         for b in buttons:
             row.addWidget(b)
         self.body.addLayout(row)
+
+    def exec(self) -> int:
+        try:
+            return super().exec()
+        finally:
+            # Keep return-value fields alive until the caller has read them, then
+            # release the parent-owned widget tree at the next event-loop turn.
+            self._dispose_after_exec()
+
+    def _dispose_after_exec(self) -> None:
+        self.deleteLater()
+
+    def apply_theme(self, mode: str) -> None:
+        """Refresh this card's explicit colors after a real theme change."""
+        old_text = self.text_col
+        self.mode = mode
+        bg, self.text_col = _card_colors(mode)
+        self.card.setStyleSheet(
+            f"#dialogCard {{ background: {bg}; border: 1px solid {BORDER}; border-radius: 12px; }}"
+        )
+        for widget in self.findChildren(QWidget):
+            sheet = widget.styleSheet()
+            if old_text in sheet:
+                widget.setStyleSheet(sheet.replace(old_text, self.text_col))
 
     # frameless windows can't be moved by a title bar -> let the card drag the dialog
     def mousePressEvent(self, e):

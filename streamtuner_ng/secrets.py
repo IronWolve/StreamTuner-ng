@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 
 from .security import valid_id
@@ -10,6 +11,7 @@ from .security import valid_id
 class SecretStore:
     def __init__(self, config):
         self.config = config
+        self._lock = threading.RLock()
         record = config.load('secrets')
         record = record if isinstance(record, dict) else {}
         identity = record.get('id', '')
@@ -27,6 +29,10 @@ class SecretStore:
         return 'streamtuner-ng:' + self.identity
 
     def _secure_backend(self):
+        with self._lock:
+            return self._secure_backend_locked()
+
+    def _secure_backend_locked(self):
         if not self._backend_checked:
             self._backend_checked = True
             if os.environ.get('STREAMTUNER_KEYRING') == 'disabled':
@@ -42,6 +48,10 @@ class SecretStore:
         return self._backend
 
     def get(self, key, default=''):
+        with self._lock:
+            return self._get_locked(key, default)
+
+    def _get_locked(self, key, default=''):
         if key in self._cache:
             return self._cache[key]
         if key in self.keyring_keys:
@@ -57,6 +67,10 @@ class SecretStore:
         return default
 
     def set(self, key, value):
+        with self._lock:
+            self._set_locked(key, value)
+
+    def _set_locked(self, key, value):
         if not valid_id(key) or not isinstance(value, str):
             raise ValueError('Invalid credential name or value')
         backend = self._secure_backend()

@@ -448,10 +448,13 @@ class Config:
                 self._write_condition.notify_all()
         return queued
 
-    def save_settings(self) -> None:
+    def settings_snapshot(self) -> dict:
+        """Return detached settings for consistent comparisons outside the lock."""
         with self._write_lock:
-            snapshot = copy.deepcopy(self.settings)
-        self.save("settings", snapshot)
+            return copy.deepcopy(self.settings)
+
+    def save_settings(self) -> None:
+        self.save("settings", self.settings_snapshot())
 
     # ---- per-(channel, category) station-list cache on disk (so relaunch is instant) ----
     def _cache_path(self, cid: str, cat: str) -> Path:

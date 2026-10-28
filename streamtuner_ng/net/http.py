@@ -148,10 +148,16 @@ class _ContextFanoutPool:
             desired = min(workers, self.limit)
             while len(lanes) < desired and len(self.threads) < self.limit:
                 lanes.append(self._new_lane())
-            if not lanes:
-                lanes.append(min(range(len(self.threads)), key=lambda lane: self.loads[lane]))
+            # A warmed pool can lend its existing workers to a new provider.
+            # Keep the provider's established lanes for connection reuse, but
+            # fill its requested width even when no more threads may be made.
+            if len(lanes) < desired:
+                available = sorted((lane for lane in range(len(self.threads)) if lane not in lanes),
+                                   key=lambda lane: self.loads[lane])
+                lanes.extend(available[:desired - len(lanes)])
+            dispatch_lanes = lanes[:desired]
             for index, value in enumerate(items):
-                lane = lanes[index % len(lanes)]
+                lane = dispatch_lanes[index % len(dispatch_lanes)]
                 self.queues[lane].put_nowait((fn, value, index, results, cancel_event))
                 self.loads[lane] += 1
                 self.pending += 1

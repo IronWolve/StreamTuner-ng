@@ -91,8 +91,12 @@ class Shoutcast(Channel):
 
     @staticmethod
     def _map(data) -> list[dict]:
+        if not isinstance(data, list):
+            raise ValueError("Shoutcast returned an invalid station page")
         rows = []
         for s in data:
+            if not isinstance(s, dict):
+                continue
             sid = s.get("ID")
             if sid is None:
                 continue
@@ -101,8 +105,8 @@ class Shoutcast(Channel):
                 url=TUNEIN + str(sid),       # public tune-in .pls; mpv loads it directly
                 genre=s.get("Genre", ""),
                 playing=s.get("CurrentTrack", ""),
-                listeners=int(s.get("Listeners") or 0),   # REAL live listeners
-                bitrate=int(s.get("Bitrate") or 0),
+                listeners=s.get("Listeners") or 0,   # normalized by the host, including malformed metrics
+                bitrate=s.get("Bitrate") or 0,
                 format=s.get("Format", "audio/mpeg"),
                 listformat="pls",
             ))

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import theme
 from .dialogs import StyledDialog, info
-from .worker import run_cache, run_io
+from .worker import run_cache, run_credentials, run_io
 
 
 class OptionsDialog(StyledDialog):
@@ -47,10 +47,18 @@ class OptionsDialog(StyledDialog):
         if self.config is not None:
             self.config.enable_async_writes()
         self.muted = "#9aa3ad" if theme.is_dark(mode) else "#566070"   # secondary text, readable on dark/light
+        self.theme_changed.connect(self.apply_theme)
         self._closed = False
         self._operation_generation = 0
         self._usage_generation = 0
         self._data_cancel = None
+        self._pending_completions = 0
+        self._dispose_requested = False
+        self._aa_key_version = 0
+        self._aa_key_dirty = False
+        self._aa_key_value = None
+        self._aa_key_requested = None
+        self._aa_key_request_id = 0
         self.finished.connect(self._mark_closed)
         self.resize(740, 600)
         tabs = QTabWidget()
@@ -71,6 +79,27 @@ class OptionsDialog(StyledDialog):
         self._operation_generation += 1
         if self._data_cancel is not None:
             self._data_cancel.set()
+        if self._aa_key_dirty:
+            self._set_aa_key(self._aa_key_field.text())
+
+    def _dispose_after_exec(self) -> None:
+        self._dispose_requested = True
+        if not self._pending_completions:
+            self.deleteLater()
+
+    def apply_theme(self, mode: str) -> None:
+        old_muted = self.muted
+        super().apply_theme(mode)
+        self.muted = "#9aa3ad" if theme.is_dark(mode) else "#566070"
+        for widget in self.findChildren(QWidget):
+            sheet = widget.styleSheet()
+            if old_muted in sheet:
+                widget.setStyleSheet(sheet.replace(old_muted, self.muted))
+
+    def _completion_finished(self) -> None:
+        self._pending_completions -= 1
+        if self._dispose_requested and not self._pending_completions:
+            self.deleteLater()
 
     def closeEvent(self, event) -> None:
         # QDialog.finished covers accept/reject/done; a window-manager close can
@@ -130,9 +159,10 @@ class OptionsDialog(StyledDialog):
 
         v.addSpacing(8)
         v.addWidget(QLabel("<b>AudioAddict (DI.FM family)</b>"))
-        aakey = QLineEdit((self.config.get("audioaddict_listen_key", "") if self.config else "") or "")
-        aakey.setPlaceholderText("your DI.FM / AudioAddict listen key")
+        aakey = self._aa_key_field = QLineEdit()
+        aakey.setPlaceholderText("Loading listen key…" if self.config else "your DI.FM / AudioAddict listen key")
         aakey.setEchoMode(QLineEdit.Password)        # it's a credential — mask by default
+        aakey.textEdited.connect(self._aa_key_edited)
         aakey.editingFinished.connect(lambda: self._set_aa_key(aakey.text()))
         reveal = QPushButton("Show")
         reveal.setCheckable(True)                    # lit = revealed
@@ -150,7 +180,7 @@ class OptionsDialog(StyledDialog):
         ahint.setStyleSheet(f"color: {self.muted};")
         ahint.setWordWrap(True)
         v.addWidget(ahint)
-        secret_hint = QLabel(self.config.secrets.status if self.config else "")
+        secret_hint = self._secret_hint = QLabel(self.config.secrets.status if self.config else "")
         secret_hint.setTextFormat(Qt.PlainText)
         secret_hint.setWordWrap(True)
         v.addWidget(secret_hint)
@@ -159,6 +189,10 @@ class OptionsDialog(StyledDialog):
         transport_hint.setWordWrap(True)
         v.addWidget(transport_hint)
         v.addStretch(1)
+        if self.config is not None:
+            version = self._aa_key_version
+            run_credentials(lambda: self.config.get("audioaddict_listen_key", "") or "",
+                            lambda result, g=version: self._aa_key_loaded(g, result))
         return w
 
     def _toggle_notifications(self, on: bool) -> None:
@@ -174,10 +208,66 @@ class OptionsDialog(StyledDialog):
         self.settings_changed.emit()
 
     def _set_aa_key(self, text: str) -> None:
-        if self.config is not None:
-            self.config.set("audioaddict_listen_key", text.strip())
-            self.config.save_settings()
-        self.settings_changed.emit()
+        if self.config is None or not self._aa_key_dirty:
+            return
+        value = text.strip()
+        if value == self._aa_key_requested or (self._aa_key_requested is None and value == self._aa_key_value):
+            self._aa_key_dirty = False
+            return
+        self._aa_key_dirty = False
+        self._aa_key_requested = value
+        self._aa_key_request_id += 1
+        request_id = self._aa_key_request_id
+        saved = threading.Event()
+        saves = getattr(self.parent(), "_secret_saves", None)
+        if saves is not None:
+            saves.add(saved)
+        self._pending_completions += 1
+        self._secret_hint.setText("Saving listen key…")
+        # Queue every accepted edit immediately in the shared single-worker lane.
+        # A closed dialog must never enqueue an older edit after a newly opened one.
+        run_credentials(lambda: self.config.set("audioaddict_listen_key", value),
+                        lambda result, v=value, r=request_id, event=saved: self._aa_key_saved(v, r, event, result))
+
+    def _aa_key_edited(self, _text: str) -> None:
+        self._aa_key_dirty = True
+        self._aa_key_version += 1
+
+    def _aa_key_loaded(self, version: int, result) -> None:
+        if self._closed or version != self._aa_key_version:
+            return
+        self._aa_key_field.setPlaceholderText("your DI.FM / AudioAddict listen key")
+        if isinstance(result, BaseException):
+            self._secret_hint.setText("Listen key could not be loaded. Reopen Options to try again.")
+            return
+        self._aa_key_value = str(result)
+        self._aa_key_field.setText(self._aa_key_value)
+
+    def _aa_key_saved(self, value: str, request_id: int, saved, result) -> None:
+        try:
+            if isinstance(result, BaseException):
+                message = "Listen key could not be saved. Reopen Options to try again."
+                if request_id == self._aa_key_request_id:
+                    self._aa_key_requested = None
+                    self._aa_key_dirty = True
+                if not self._closed and request_id == self._aa_key_request_id:
+                    self._secret_hint.setText(message)
+                elif not self._parent_is_closing():
+                    report = getattr(self.parent(), "_status_error", None)
+                    if report is not None:
+                        report(message)
+            else:
+                self._aa_key_value = value
+                if not self._closed and request_id == self._aa_key_request_id:
+                    self._secret_hint.setText(self.config.secrets.status)
+                if not self._parent_is_closing():
+                    self.settings_changed.emit()
+        finally:
+            saved.set()
+            saves = getattr(self.parent(), "_secret_saves", None)
+            if saves is not None:
+                saves.discard(saved)
+            self._completion_finished()
 
     def _reveal_aa_key(self, field: QLineEdit, btn: QPushButton, on: bool) -> None:
         field.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password)
@@ -315,9 +405,16 @@ class OptionsDialog(StyledDialog):
         self._clear_cache_button.setEnabled(False)
         self._data_msg.setText("Clearing station cache…")
         self.cache_clearing.emit()
+        self._pending_completions += 1
         run_cache(self.config.cache_clear_disk, self._cache_clear_finished)
 
     def _cache_clear_finished(self, result) -> None:
+        try:
+            self._cache_clear_result(result)
+        finally:
+            self._completion_finished()
+
+    def _cache_clear_result(self, result) -> None:
         error = self._error_text(result)
         if error:
             if not self._closed:
@@ -339,9 +436,16 @@ class OptionsDialog(StyledDialog):
         self._clear_icons_button.setEnabled(False)
         self._data_msg.setText("Clearing icon cache…")
         self.icons_clearing.emit()
+        self._pending_completions += 1
         run_cache(self.config.clear_icons, self._icons_clear_finished)
 
     def _icons_clear_finished(self, result) -> None:
+        try:
+            self._icons_clear_result(result)
+        finally:
+            self._completion_finished()
+
+    def _icons_clear_result(self, result) -> None:
         error = self._error_text(result)
         if error:
             if not self._closed:
@@ -746,8 +850,8 @@ class OptionsDialog(StyledDialog):
         elif os.path.isabs(cur):
             txt = f"Custom image: {cur}"
         else:
-            txt = f"Built-in wallpaper: <b>{cur}</b>"
-        self._wp_label.setText(txt + " &nbsp; A higher <i>Dim</i> darkens it so the list stays readable.")
+            txt = f"Built-in wallpaper: {cur}"
+        self._wp_label.setText(txt + "  A higher Dim darkens it so the list stays readable.")
 
     def _toggle_wallpaper(self, on: bool) -> None:
         if self.config is not None:
@@ -840,6 +944,10 @@ class OptionsDialog(StyledDialog):
         self._font_size.setValue(px)
         self._font_size.blockSignals(False)
         self.font_changed.emit()
+        from PySide6.QtWidgets import QApplication
+        self._font_combo.blockSignals(True)
+        self._font_combo.setCurrentFont(QApplication.font())
+        self._font_combo.blockSignals(False)
 
     def _export_theme(self) -> None:
         import json

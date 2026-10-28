@@ -98,7 +98,10 @@ class RadioBrowser(Channel):
     def _map(data) -> list[dict]:
         rows = []
         for s in data:
-            codec = (s.get("codec") or "").lower()
+            if not isinstance(s, dict):
+                continue
+            codec = s.get("codec")
+            codec = codec.lower() if isinstance(codec, str) else ""
             rows.append(make_row(
                 title=s.get("name", ""),
                 url=s.get("url_resolved") or s.get("url", ""),
@@ -106,9 +109,9 @@ class RadioBrowser(Channel):
                 favicon=s.get("favicon", ""),
                 genre=s.get("tags", ""),
                 country=s.get("country", ""),
-                votes=int(s.get("votes") or 0),
-                listeners=int(s.get("clickcount") or 0),   # 24h clicks ~ popularity
-                bitrate=int(s.get("bitrate") or 0),
+                votes=s.get("votes") or 0,
+                listeners=s.get("clickcount") or 0,   # normalized by the host with the other row fields
+                bitrate=s.get("bitrate") or 0,
                 format=f"audio/{codec}" if codec else "",
                 listformat="srv",   # RadioBrowser gives direct/resolved stream URLs
             ))
@@ -138,8 +141,10 @@ class RadioBrowser(Channel):
     def _page(self, raw, offset: int, requested: int, ceiling: int) -> Page:
         # Preserve the API row count before make_row/security sanitization. A full
         # raw page may sanitize to zero valid stations and still need continuation.
-        raw_count = len(raw) if isinstance(raw, list) else 0
-        rows = self._map(raw if isinstance(raw, list) else [])
+        if not isinstance(raw, list):
+            raise ValueError("RadioBrowser returned an invalid station page")
+        raw_count = len(raw)
+        rows = self._map(raw)
         has_more = bool(raw_count and raw_count >= requested and offset + raw_count < ceiling)
         return Page(rows, has_more=has_more,
                     next_offset=offset + raw_count if has_more else None)

@@ -9,6 +9,7 @@ calls become safe no-ops, so the rest of the app still runs (DECISIONS D9/D5b).
 from __future__ import annotations
 
 import re
+import math
 import threading
 from typing import Callable
 
@@ -217,15 +218,20 @@ class Player:
 
         def g(key: str) -> float:
             try:
-                return float(md.get(key, "-100"))
+                value = float(md.get(key, "-100"))
+                return value if math.isfinite(value) else -100.0
             except (TypeError, ValueError):
                 return -100.0
 
         left, right = g("lavfi.astats.1.RMS_level"), g("lavfi.astats.2.RMS_level")
         lpk, rpk = g("lavfi.astats.1.Peak_level"), g("lavfi.astats.2.Peak_level")
-        if left <= -99 and right <= -99:               # mono → drive both bars from Overall
+        # Missing channel metadata identifies mono; a real stereo channel may
+        # simply be silent, and must not be replaced with an Overall average.
+        if "lavfi.astats.1.RMS_level" not in md and "lavfi.astats.2.RMS_level" not in md:
             left = right = g("lavfi.astats.Overall.RMS_level")
             lpk = rpk = g("lavfi.astats.Overall.Peak_level")
+        elif "lavfi.astats.2.RMS_level" not in md:
+            right, rpk = left, lpk
         return (left, right, lpk, rpk)
 
     def set_normalize(self, on: bool) -> None:
