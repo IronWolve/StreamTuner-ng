@@ -107,6 +107,11 @@ is optional and defaults sensibly:
   streams the rest in. Implement `update_streams_page(category, offset, limit, search)`.
 - **`needs_resolve = True`** + **`resolve_url(row)`** — if the row URL is an indirection
   that must be turned into a real stream URL at play time (e.g. a tune-in link).
+- **`local_files = True`** — your plugin serves local files (for example PLS/M3U/audio files from a
+  folder or NAS). Rows may then use `file:///…` URLs, built with `Path(p).as_uri()`. Set the plugin's
+  `homepage` to a `file:///…/` folder URI and the channel's right-click menu gets **Open Folder**.
+  Without this flag only `http`, `https`, `icy` and `mmsh` stream URLs are accepted. Favorites,
+  CSV and backup imports always stay network-only, and `file:` is never opened as a web link.
 - **`group = "MyNetwork"`** — render several related channels under one sidebar header.
 - **`priority`** — `"core"/"standard"/"default"` = on by default; anything else = off.
 - **`options_spec = [...]`** — add your own **right-click menu options** with no UI code. The app
@@ -121,6 +126,42 @@ is optional and defaults sensibly:
   ]
   # then in update_streams / resolve_url:  q = self.config.get("myradio_quality", "hi")
   ```
+
+## Extra columns
+
+A plugin can add its own table columns (Year, Language, Size, …) next to the built-in ones.
+Declare them on the class and fill them per row with `extra`:
+
+```python
+class MyRadio(Channel):
+    extra_columns = [("Year", "year", "int"), ("Language", "language")]   # (label, key[, type])
+
+    def update_streams(self, category, search=None):
+        return [make_row(title="Cool FM", url="https://stream.example.com/cool.mp3",
+                         extra={"year": 1999, "language": "German"})]
+```
+
+- **Type** is `text` (default), `int`, `float` or `date` (ISO text such as `2026-11-05`). It decides
+  sorting (numbers sort as numbers), alignment and formatting.
+- **Limits:** at most 8 columns; the label is 1-24 characters; the key is lowercase letters, digits
+  and `_` (max 24), not a built-in field name and not credential-like (`token`, `key`, …). Text is
+  capped at 256 characters and shown as plain text.
+- **Only declared keys are kept.** A value for a key you did not declare is dropped and noted in the
+  plugin's View Log. A bad declaration is logged the same way.
+- `default_sort = "year"` can name an extra column.
+- Extra values are saved with the station (cache, Favorites, history, backups) and written to CSV
+  export; CSV import ignores them. In **View → Columns** users can hide any column or reset them.
+  Favorites and Local show the columns of every enabled service.
+
+## Rejected rows and compatibility
+
+Rows the app refuses (an unsupported URL scheme, a missing URL) are not shown. The result carries a
+message such as `2 row(s) rejected from myradio: unsupported URL scheme 'file' (set local_files = True
+on the plugin to allow file://)`, so a plugin author can see why a list is short.
+
+`PLUGIN_API` in `streamtuner_ng.plugins.base` is the plugin-contract revision. Plugins written against
+an earlier revision keep working; anything that tightens what a plugin may return is announced in the
+release notes first.
 
 ## Paged results and refresh
 

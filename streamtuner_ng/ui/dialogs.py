@@ -211,6 +211,33 @@ def info(parent, mode: str, title: str, text: str) -> None:
     dlg.exec()
 
 
+def log_viewer(parent, mode: str, title: str, text: str, empty: str, on_clear=None) -> None:
+    """Scrollable, selectable log with Copy and Clear — for plugin authors debugging a script."""
+    dlg = StyledDialog(parent, title, mode)
+    dlg.card.setMinimumWidth(680)
+    view = QPlainTextEdit()
+    view.setReadOnly(True)
+    view.setLineWrapMode(QPlainTextEdit.NoWrap)
+    view.setMinimumHeight(300)
+    view.setStyleSheet(f"font-family: monospace; color:{dlg.text_col};")
+    view.setPlainText(text or empty)
+    view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())   # newest entries last
+    dlg.body.addWidget(view)
+    copy, clear, close = QPushButton("Copy"), QPushButton("Clear"), QPushButton("Close")
+
+    def do_copy():
+        QApplication.clipboard().setText(view.toPlainText() if text else "")
+    def do_clear():
+        if on_clear:
+            on_clear()
+        view.setPlainText(empty)
+    copy.clicked.connect(do_copy)
+    clear.clicked.connect(do_clear)
+    close.clicked.connect(dlg.accept)
+    dlg.add_buttons(copy, clear, close)
+    dlg.exec()
+
+
 def confirm(parent, mode: str, title: str, text: str) -> bool:
     """Styled Yes / Cancel confirmation. Returns True only if confirmed."""
     dlg = StyledDialog(parent, title, mode)
@@ -227,7 +254,7 @@ def confirm(parent, mode: str, title: str, text: str) -> bool:
     return bool(dlg.exec())
 
 
-def station_info(parent, mode: str, row: dict) -> None:
+def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None) -> None:
     """Styled per-station info card: Name / Genre / Bitrate·Codec / Country / URL, one
     per line (selectable), with a Copy URL button."""
     dlg = StyledDialog(parent, row.get("title", "Station"), mode)
@@ -253,6 +280,9 @@ def station_info(parent, mode: str, row: dict) -> None:
         ("Homepage", row.get("homepage", "")),
         ("URL", row.get("url", "")),
     ]
+    for key, value in (row.get("extra") or {}).items():           # columns added by the service
+        label = (extra_labels or {}).get(key) or str(key).replace("_", " ").title()
+        fields.insert(len(fields) - 2, (label, value))
     grid = QGridLayout()
     grid.setHorizontalSpacing(14)
     r = 0

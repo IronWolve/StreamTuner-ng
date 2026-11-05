@@ -19,6 +19,10 @@ from .result import Page
 
 _SNAPSHOT_INIT_LOCK = threading.Lock()
 
+# Plugin API revision. Bump it (and note it in PLUGINS.md and the release notes) whenever
+# the plugin-facing contract changes: Channel attributes, row fields, accepted URL schemes.
+PLUGIN_API = 3   # 3: declared `extra_columns` + row `extra`; 2: opt-in `local_files`, rejected-row reporting
+
 # The station row schema. title + url are required; the rest have sane defaults.
 ROW_DEFAULTS: dict[str, Any] = {
     "title": "",
@@ -40,6 +44,9 @@ ROW_DEFAULTS: dict[str, Any] = {
 def make_row(title: str, url: str, **kw: Any) -> dict[str, Any]:
     """Build a station row with defaults; drops unknown keys to keep it clean."""
     row = dict(ROW_DEFAULTS)
+    extra = kw.pop("extra", None)            # values for the channel's declared `extra_columns`
+    if isinstance(extra, dict) and extra:
+        row["extra"] = dict(extra)
     row["title"] = title.strip() if isinstance(title, str) else ""
     row["url"] = url.strip() if isinstance(url, str) else ""
     for k, v in kw.items():
@@ -76,6 +83,11 @@ class Channel:
                                  # just reads its config key back) — see PLUGINS.md. Supports a "choice"
                                  # submenu (e.g. bitrate) and a "secret" login/key dialog. Empty = none.
     test_only: bool = False      # hidden helper plugins (e.g. selftest fakes)
+    extra_columns: list = []     # extra table columns, e.g. [("Year", "year", "int"), ("Language", "language")]
+                                 # entries are (label, key[, type]); type = text|int|float|date. Rows fill
+                                 # them with make_row(..., extra={"year": 1999}). At most 8, see PLUGINS.md.
+    local_files: bool = False    # opt in: rows may use file:// URLs (local PLS/M3U/audio files) and
+                                 # a file:// directory `homepage` opens in the file manager
 
     def __init__(self, config: Any = None):
         self.config = config

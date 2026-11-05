@@ -28,6 +28,8 @@ class RadioBrowser(Channel):
     homepage = "https://www.radio-browser.info/"
     priority = "core"          # on by default
     has_search = True
+    # Extra table columns (PLUGINS.md "Extra columns"): radio-browser reports these per station.
+    extra_columns = [("Language", "language"), ("State", "state")]
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -84,15 +86,45 @@ class RadioBrowser(Channel):
     _FETCH_TIMEOUT = 8.0
     # the API silently caps at 1000 if no limit is sent — ask for everything
     _ALL = 100000
+    COUNTRY = "Country: "          # "Country: Germany" -> stations/bycountrycodeexact/DE
+    _MIN_COUNTRY_STATIONS = 10     # skip near-empty countries so the list stays browsable
+
+    def _country_map(self, refresh: bool = False) -> dict[str, str]:
+        """Category label -> ISO 3166-1 code. Rebuilt on demand: disk-cached category names do
+        not restore this map, so a cached "Country: X" must be able to resolve itself."""
+        if refresh or not getattr(self, "_countries", None):
+            found: dict[str, str] = {}
+            for c in self._get("countries", {"hidebroken": "true"}):
+                if not isinstance(c, dict):
+                    continue
+                name, code = c.get("name"), c.get("iso_3166_1")
+                count = c.get("stationcount")
+                if (isinstance(name, str) and name.strip() and isinstance(code, str)
+                        and re.fullmatch(r"[A-Za-z]{2}", code)
+                        and isinstance(count, int) and count >= self._MIN_COUNTRY_STATIONS):
+                    found[self.COUNTRY + name.strip()[:80]] = code.upper()
+            self._countries = found
+        return self._countries
 
     def update_categories(self) -> list[str]:
         tags = self._get(
             "tags",
             {"order": "stationcount", "reverse": "true", "hidebroken": "true", "limit": 80},
         )
-        # "Top" + "All" pinned first, then the tags A–Z.
+        # "Top" + "All" pinned first, then the tags A–Z with the countries beside them.
         names = sorted({t["name"].title() for t in tags if t.get("name")})
+        try:
+            names += sorted(self._country_map(refresh=True))
+        except (http.RequestCancelled, http.RequestDeadlineExceeded):
+            raise
+        except Exception:
+            pass       # genre browsing still works if the country list is unavailable
         return [self.TOP, self.ALL] + names
+
+    @staticmethod
+    def _language(value) -> str:
+        """radio-browser sends "german,english"; show "German, English"."""
+        return ", ".join(p.strip().title() for p in value.split(",") if p.strip()) if isinstance(value, str) else ""
 
     @staticmethod
     def _map(data) -> list[dict]:
@@ -114,6 +146,7 @@ class RadioBrowser(Channel):
                 bitrate=s.get("bitrate") or 0,
                 format=f"audio/{codec}" if codec else "",
                 listformat="srv",   # RadioBrowser gives direct/resolved stream URLs
+                extra={"language": RadioBrowser._language(s.get("language")), "state": s.get("state")},
             ))
         return rows
 
@@ -133,6 +166,11 @@ class RadioBrowser(Channel):
             return self._page(raw, offset, params["limit"], 1000)
         if category == self.ALL:
             endpoint = "stations"                    # the entire directory (~57k)
+        elif category.startswith(self.COUNTRY):
+            code = self._country_map().get(category)
+            if not code:
+                raise ValueError("Unknown RadioBrowser country: " + category[:80])
+            endpoint = "stations/bycountrycodeexact/" + code
         else:
             endpoint = "stations/bytag/" + quote(category.lower(), safe="")
         raw = self._get(endpoint, params, self._FETCH_TIMEOUT)

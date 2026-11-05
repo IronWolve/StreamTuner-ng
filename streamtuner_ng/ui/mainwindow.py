@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._cat_ages = {}
         self._load_complete = True
         self._load_errors = []
+        self._load_notes = []
         self._load_started = False
         self._retain_during_load = False
         self._fresh_rows = []
@@ -457,17 +458,10 @@ class MainWindow(QMainWindow):
 
         m_view = mb.addMenu("&View")
         m_view.addAction(QAction("Reload current channel", self, shortcut="F5", triggered=self._reload))
-        columns_menu = m_view.addMenu("Columns")
+        self._columns_menu = m_view.addMenu("Columns")
         self._column_actions = {}
-        saved_columns = self.config.get("visible_columns", [])
-        for label, field in COLUMNS:
-            action = QAction(label, self, checkable=True)
-            action.setChecked(field == "title" or (field in saved_columns if saved_columns else field != "url"))
-            action.setEnabled(field != "title")
-            action.setToolTip("Shown when this service supplies the field")
-            action.toggled.connect(lambda on, name=field: self._set_column_visible(name, on))
-            columns_menu.addAction(action)
-            self._column_actions[field] = action
+        self._columns_menu.aboutToShow.connect(self._rebuild_columns_menu)    # a service can add its own
+        self._rebuild_columns_menu()
         self._art_action = QAction("Show album art", self, checkable=True)
         self._art_action.setChecked(self._show_art)
         self._art_action.triggered.connect(self._toggle_art)
@@ -641,7 +635,10 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         home = getattr(ch, "homepage", "")
-        if home:
+        if home and home.startswith("file:"):
+            if getattr(ch, "local_files", False):
+                menu.addAction("Open Folder", lambda: self._open_local_folder(home))
+        elif home:
             menu.addAction("Open Website", lambda: self._open_website(home))
         if cid == "bookmarks":                   # Favorites: export favourites OR history; import (merge)
             menu.addAction("Export Favorites… (CSV)",
@@ -758,6 +755,13 @@ class MainWindow(QMainWindow):
         destination = Path(path)
         cols = [("title", "Title"), ("url", "URL"), ("genre", "Genre"), ("country", "Country"),
                 ("bitrate", "Bitrate"), ("format", "Format"), ("homepage", "Homepage")]
+        labels = {field[2:]: label for label, field in self.model.columns() if field.startswith("x:")}
+        extra_keys = []
+        for item in snapshot:
+            for key in (item.get("extra") or {}):
+                if key not in extra_keys and len(extra_keys) < 12:
+                    extra_keys.append(key)
+        cols += [("x:" + key, labels.get(key, key.replace("_", " ").title())) for key in extra_keys]
         # Favorites/Local replace rows on mutation; they do not edit them in place.
         # Capturing the tuple keeps the exact list version selected by the user.
         secret_snapshot = tuple(self.config.secrets._cache.copy().values())
@@ -779,7 +783,9 @@ class MainWindow(QMainWindow):
                     for row in snapshot:
                         if cancel.is_set():
                             raise CancelledError("CSV export cancelled")
-                        writer.writerow([csv_cell(row.get(key, ""), secret_snapshot) for key, _heading in cols])
+                        writer.writerow([csv_cell(
+                            (row.get("extra") or {}).get(key[2:], "") if key.startswith("x:") else row.get(key, ""),
+                            secret_snapshot) for key, _heading in cols])
                     stream.flush()
                     os.fsync(stream.fileno())
                 if cancel.is_set():
@@ -1170,6 +1176,7 @@ class MainWindow(QMainWindow):
         self._load_started = False
         self._load_complete = True
         self._load_errors = []
+        self._load_notes = []
         self._fresh_rows = []
         self._fresh_seen = set()
         self._pending_restore = None
@@ -1185,10 +1192,12 @@ class MainWindow(QMainWindow):
         """Apply the current channel's default table sort (Shoutcast → by listeners, descending),
         or clear sorting to the source order for channels that don't set one. The proxy keeps the
         order as rows stream in, so a progressively-loaded list stays sorted."""
+        self._sync_extra_columns()
         ch = self.host.channels.get(self.current_channel)
         field = getattr(ch, "default_sort", "") if ch else ""
         if field:
-            col = next((i for i, (_lbl, key) in enumerate(COLUMNS) if key == field), -1)
+            col = next((i for i, (_lbl, key) in enumerate(self.model.columns())
+                        if key in (field, "x:" + field)), -1)
             if col >= 0:
                 self.table.sortByColumn(col, Qt.DescendingOrder)
                 return
@@ -1255,6 +1264,9 @@ class MainWindow(QMainWindow):
         rows = result.data or []
         self._load_complete &= bool(getattr(result, "complete", True))
         self._load_errors.extend(getattr(result, "errors", ()) or ())
+        note = getattr(result, "message", "")
+        if isinstance(note, str) and note and note != "no results" and note not in self._load_notes:
+            self._load_notes.append(note)          # e.g. "2 row(s) rejected from <plugin>: …"
         if rows:
             if self._retain_during_load:
                 for row in rows:
@@ -1303,7 +1315,9 @@ class MainWindow(QMainWindow):
             if cid not in self.INTERNAL_CHANNELS:
                 self._cache[(cid, cat)] = rows
                 self._save_catalog(cid, cat, rows)
-            self._list_message(f"Loaded {len(rows):,} stations from {ch.title}" if rows else self._empty_message(cid, cat))
+            notes = (" " + " ".join(self._load_notes[:2])) if self._load_notes else ""
+            self._list_message((f"Loaded {len(rows):,} stations from {ch.title}" if rows
+                                else self._empty_message(cid, cat)) + notes)
         else:
             detail = self.config.redact("; ".join(self._load_errors[:3]))
             self._list_message(f"Partial list: {len(rows):,} stations. Saved complete list retained. {detail}")
@@ -1337,16 +1351,71 @@ class MainWindow(QMainWindow):
                     seen[row["url"]] = row
         return list(seen.values())
 
+    def _channel_columns(self, cid: str) -> list:
+        """Extra columns for the viewed channel. Favorites and Local hold rows from many services,
+        so they offer the columns of every enabled service (first declaration of a key wins)."""
+        if cid in ("bookmarks", "local"):
+            seen, out = set(), []
+            for other in self.host.channels:
+                if other in ("bookmarks", "local") or not self.host.is_enabled(other):
+                    continue
+                for item in self.host.columns_for(other):
+                    if item[1] not in seen and len(out) < 12:
+                        seen.add(item[1])
+                        out.append(item)
+            return out
+        return self.host.columns_for(cid) if cid and self.host.is_enabled(cid) else []
+
+    def _sync_extra_columns(self, cid: str | None = None) -> bool:
+        return self.model.set_extra_columns(self._channel_columns(cid or self.current_channel))
+
+    def _hidden_extra(self, cid: str) -> set:
+        hidden = self.config.get("hidden_extra_columns", {})
+        keys = hidden.get(cid, []) if isinstance(hidden, dict) else []
+        return {k for k in keys if isinstance(k, str)} if isinstance(keys, list) else set()
+
+    def _rebuild_columns_menu(self) -> None:
+        menu = self._columns_menu
+        menu.clear()
+        self._column_actions = {}
+        saved_columns = self.config.get("visible_columns", [])
+        columns = self.model.columns() if hasattr(self, "model") else list(COLUMNS)
+        hidden = self._hidden_extra(self.current_channel)
+        for label, field in columns:
+            extra = field.startswith("x:")
+            action = QAction(label, self, checkable=True)
+            action.setChecked((field[2:] not in hidden) if extra else
+                              (field == "title" or (field in saved_columns if saved_columns else field != "url")))
+            action.setEnabled(field != "title")
+            action.setToolTip("Added by this service" if extra else "Shown when this service supplies the field")
+            action.toggled.connect(lambda on, name=field: self._set_column_visible(name, on))
+            menu.addAction(action)
+            self._column_actions[field] = action
+        menu.addSeparator()
+        menu.addAction(QAction("Reset columns", self, triggered=self._reset_columns))
+
+    def _reset_columns(self) -> None:
+        self.config.set("visible_columns", [])
+        self.config.set("hidden_extra_columns", {})
+        self.config.save_settings()
+        self._apply_column_visibility()
+        self.statusBar().showMessage("Columns reset", 3000)
+
     def _apply_column_visibility(self) -> None:
+        self._sync_extra_columns()
         if not self.model.rowCount():
             return
-        for col, (_label, field) in enumerate(COLUMNS):
-            preferred = self.config.get("visible_columns", [])
+        preferred = self.config.get("visible_columns", [])
+        hidden = self._hidden_extra(self.current_channel)
+        for col, (_label, field) in enumerate(self.model.columns()):
             visible = self.model.has_field(field)
-            if field == "url" and not preferred:
-                visible = False
-            if preferred:
-                visible = visible and (field == "title" or field in preferred)
+            if field.startswith("x:"):
+                visible = visible and field[2:] not in hidden
+            else:
+                if field == "url" and not preferred:
+                    visible = False
+                if preferred:
+                    visible = visible and (field == "title" or field in preferred)
             self.table.setColumnHidden(col, not visible)
 
 
@@ -1398,7 +1467,8 @@ class MainWindow(QMainWindow):
 
     def _station_info(self, row: dict) -> None:
         from .dialogs import station_info
-        station_info(self, self.config.get("theme", "dark"), row)
+        labels = {field[2:]: label for label, field in self.model.columns() if field.startswith("x:")}
+        station_info(self, self.config.get("theme", "dark"), row, extra_labels=labels)
 
     def _nowplaying_menu(self, pos) -> None:
         """Right-click the now-playing text on the player bar: copy the track / stream URL, station
@@ -1494,7 +1564,9 @@ class MainWindow(QMainWindow):
         if self._closing or (generation is not None and generation != self._play_gen):
             return
         self._pending_play = False
-        row = station_row(row)
+        origin = self.host.channels.get(self._resolve_source(row))
+        local = bool(getattr(origin, "local_files", False))   # plugin opted in to file:// stations
+        row = station_row(row, local=local)
         if row is None:
             self._status_error("Unsupported or invalid station URL")
             return
@@ -1507,10 +1579,10 @@ class MainWindow(QMainWindow):
             url = resolved.data.get("url")
         else:
             url = row["url"]
-        if not valid_url(url):
+        if not valid_url(url, local=local):
             self._status_error("This station did not resolve to a supported network stream")
             return
-        if not self.player.play(url):
+        if not (self.player.play(url, local=True) if local else self.player.play(url)):
             self._status_error(self.config.redact(self.player.error or "Audio playback is unavailable"))
             self.btn_play.setChecked(bool(self.player.is_playing))
             return
@@ -2272,6 +2344,25 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl(url))
 
+    def _open_local_folder(self, url: str) -> None:
+        """Open a plugin's file:// folder (channel homepage of a local_files plugin) in the file
+        manager. Only an existing directory is opened; files and other schemes are refused."""
+        from pathlib import Path
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        if not valid_url(url, local=True):
+            from urllib.parse import urlsplit
+            host = urlsplit(url).netloc
+            self._status_error(
+                f"Folder link has a host name ('{host[:40]}'); build it with Path(folder).as_uri()"
+                if host and host != "localhost" else "Not a valid local folder link")
+            return
+        path = Path(QUrl(url).toLocalFile())
+        if not path.is_dir():
+            self._status_error("That folder does not exist")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def _open_location(self) -> None:
         from .dialogs import open_location
         url = open_location(self, self.config.get("theme", "dark"))
@@ -2680,6 +2771,7 @@ class MainWindow(QMainWindow):
         self._load_started = False
         self._load_complete = True
         self._load_errors = []
+        self._load_notes = []
         self._retain_during_load = False
         self._fresh_rows = []
         self._fresh_seen = set()
@@ -2793,6 +2885,16 @@ class MainWindow(QMainWindow):
         self.table.viewport().update()
 
     def _set_column_visible(self, field, enabled):
+        if field.startswith("x:"):
+            hidden_map = self.config.get("hidden_extra_columns", {})
+            hidden_map = dict(hidden_map) if isinstance(hidden_map, dict) else {}
+            keys = self._hidden_extra(self.current_channel)
+            keys.discard(field[2:]) if enabled else keys.add(field[2:])
+            hidden_map[self.current_channel] = sorted(keys)
+            self.config.set("hidden_extra_columns", hidden_map)
+            self.config.save_settings()
+            self._apply_column_visibility()
+            return
         current = self.config.get("visible_columns", [])
         valid = {name for _label, name in COLUMNS}
         chosen = {name for name in current if isinstance(name, str) and name in valid} if current else valid - {"url"}

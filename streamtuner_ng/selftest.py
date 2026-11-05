@@ -45,6 +45,8 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
               all(path.parent in provider_roots for path in provider_files))
 
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
+        check('local file URLs only for opted-in plugins', valid_url('file:///music/a.pls', local=True)
+              and not valid_url('file:///music/a.pls') and not valid_url('file:///music/a.pls', local=True, web=True))
         check('supported network URLs accepted', valid_url('https://example.com/live'))
         check('malformed station rows excluded', not station_rows([None, {'url': 'file:///private'}]))
         check('CSV formulas neutralized', csv_cell('=1+1').startswith("'"))

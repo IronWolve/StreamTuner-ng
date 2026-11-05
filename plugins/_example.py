@@ -15,6 +15,20 @@
 #  The streams below are real, free, no-login public mounts, so this example
 #  actually plays the moment you drop the underscore — swap in your own URLs.
 #  (Open this folder any time:  Tools → Open Plugins Folder…)
+#
+#  DEBUGGING YOUR PLUGIN
+#    Options (Ctrl+,) → Plugins → "View Log" next to your plugin. It keeps the last 500
+#    entries with a time stamp: crashes (with the file:line of your code), timeouts,
+#    partial results, and rows the app refused, e.g.
+#        "2 row(s) rejected from myradio: unsupported URL scheme 'file' ..."
+#    Copy puts the log on the clipboard; Clear empties it. A plugin that fails to load at
+#    all is listed in orange at the top of the Plugins tab.
+#
+#  RULES FOR STATION ROWS
+#    A row's url must be http, https, icy or mmsh. Return a list of make_row(...) dicts.
+#    Rows that break this are dropped (and logged), not shown.
+#    To serve local files (a folder of .pls/.m3u/audio files), see the LOCAL FILES recipe
+#    at the bottom of this file.
 # ─────────────────────────────────────────────────────────────────────────────
 from streamtuner_ng.plugins.base import Channel, make_row
 
@@ -60,3 +74,42 @@ class ExampleRadio(Channel):
                 listformat="srv",            # "srv" = a direct stream URL (no .pls/.m3u indirection)
             ))
         return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOCAL FILES recipe — stations kept as files on this PC or a NAS (not a network URL)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Copy this into your own plugin. Set `local_files = True`; without it, file:// stations
+#  are refused (and the log says so). Build URLs with Path.as_uri(), never by hand.
+#
+#    from pathlib import Path
+#
+#    ROOT = Path("/path/to/your/radio")        # one sub-folder per category
+#
+#    class MyFiles(Channel):
+#        id = "myfiles"
+#        title = "My files"
+#        local_files = True                    # allow file:// station URLs
+#        homepage = ROOT.as_uri() + "/"        # adds "Open Folder" to the channel's menu
+#        has_search = True
+#
+#        def update_categories(self):
+#            return sorted(p.name for p in ROOT.iterdir() if p.is_dir())
+#
+#        def update_streams(self, category, search=None):
+#            rows = []
+#            for f in sorted((ROOT / category).iterdir()):
+#                if f.is_file() and (not search or search.lower() in f.stem.lower()):
+#                    rows.append(make_row(title=f.stem, url=f.as_uri(), genre=category))
+#            return rows
+#
+#  Want more columns? Declare them and fill them per row (see PLUGINS.md "Extra columns"):
+#
+#        extra_columns = [("Size", "size", "int"), ("Modified", "modified", "date")]
+#        ...
+#        rows.append(make_row(title=f.stem, url=f.as_uri(), genre=category,
+#                             extra={"size": f.stat().st_size, "modified": "2026-11-05"}))
+#
+#  Notes: the category column is the grouping (one level); the Genre column repeats it so the
+#  table can be sorted by it. Local rows play, but Favorites and CSV/backup imports only keep
+#  network stations.

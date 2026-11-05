@@ -140,8 +140,8 @@ class Player:
             self.error = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
 
     # ---- transport (all safe no-ops when unavailable) ----
-    def play(self, url: str) -> bool:
-        if not valid_url(url):
+    def play(self, url: str, *, local: bool = False) -> bool:
+        if not valid_url(url, local=local):
             self.error = "Unsupported or invalid network stream URL"
             return False
         if not self.available:

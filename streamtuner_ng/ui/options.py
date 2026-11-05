@@ -6,6 +6,7 @@ Uses the app's standard styled dialog (bordered card + drop shadow).
 from __future__ import annotations
 
 import threading
+from html import escape
 from concurrent.futures import CancelledError
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .dialogs import StyledDialog, info
+from .dialogs import StyledDialog, info, log_viewer
 from .worker import run_cache, run_credentials, run_io
 
 
@@ -672,12 +673,22 @@ class OptionsDialog(StyledDialog):
                     0, 0, 1, 5)
         internal = ("bookmarks", "local")
         chans = self.host.channels
+        problems = getattr(self.host, "load_errors", []) or []
+        row0 = 1
+        if problems:
+            warn = QLabel("<b>Could not load:</b> " + "; ".join(
+                f"{escape(str(n))} — {escape(str(e))}" for n, e in problems[:6]))
+            warn.setWordWrap(True)
+            warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            warn.setStyleSheet("color: #d9822b;")
+            g.addWidget(warn, 1, 0, 1, 5)
+            row0 = 2
         ordered = [chans[c] for c in internal if c in chans]            # Favorites, Local pinned first
         ordered += sorted((ch for cid, ch in chans.items()
                            if cid not in internal and not ch.test_only),
                           key=lambda c: c.title.lower())                # then the services, A–Z
         self._plugin_visibility_checks = {}
-        row = 1
+        row = row0
         for ch in ordered:
             cid = ch.id
             is_internal = cid in internal
@@ -747,8 +758,17 @@ class OptionsDialog(StyledDialog):
 
     def _view_log(self, cid: str) -> None:
         h = self.host.health[cid]
-        text = "\n".join(h.log) if h.log else "(no errors logged)"
-        info(self, self.mode, f"{self.host.channels[cid].title} — error log", text)
+        lines = list(h.log)
+        for name, error in getattr(self.host, "load_errors", []) or []:
+            if name == cid or name in (f"{cid}.py", f"{cid}.pyw"):
+                lines.insert(0, f"load: {error}")
+
+        def clear():
+            h.log.clear()
+            h.last_logged = ""
+        log_viewer(self, self.mode, f"{self.host.channels[cid].title} — log", "\n".join(lines),
+                   "(nothing logged — errors, timeouts, partial results and rejected rows appear here)",
+                   on_clear=clear)
 
     # ---- Themes tab ----
     def _themes_tab(self) -> QWidget:

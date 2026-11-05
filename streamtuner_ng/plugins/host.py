@@ -19,11 +19,26 @@ from typing import Any
 
 from .base import Channel
 from .result import Page, Result, Status
-from ..security import MAX_ROWS, redact_text, station_rows, valid_id, valid_url
+from ..security import MAX_ROWS, redact_text, station_rows, valid_columns, valid_id, valid_url
 
 DEFAULT_TIMEOUT = 12.0
 AUTO_DISABLE_THRESHOLD = 3      # consecutive errors before we trip a plugin off
-LOG_KEEP = 25
+LOG_KEEP = 500                    # per-plugin log entries kept in memory (viewable under Options)
+
+
+def _origin(exc: BaseException) -> str:
+    """Where a plugin exception came from, e.g. "myplugin.py:42 in update_streams" — the deepest
+    frame outside the host and installed libraries, so authors land on their own line."""
+    import os
+    import traceback
+    try:
+        frames = traceback.extract_tb(exc.__traceback__)
+    except Exception:  # noqa: BLE001
+        return ""
+    mine = [f for f in frames if "site-packages" not in f.filename
+            and os.path.basename(f.filename) != "host.py"]
+    f = (mine or frames or [None])[-1]
+    return f"{os.path.basename(f.filename)}:{f.lineno} in {f.name}" if f else ""
 
 
 @dataclass
@@ -181,6 +196,7 @@ class Health:
     ok_count: int = 0
     auto_disabled: bool = False
     log: list[str] = field(default_factory=list)
+    last_logged: str = ""   # last message appended to `log`, so repeats are not duplicated
 
 
 class PluginHost:
@@ -215,6 +231,10 @@ class PluginHost:
                     self.config.register_secret(option.get("key"))
         self.channels[cid] = channel
         self.health[cid] = Health(cid, status=Status.DISABLED)
+        problems: list[str] = []
+        valid_columns(getattr(channel, "extra_columns", ()), problems)
+        for problem in problems[:5]:
+            self._log(self.health[cid], "extra_columns: " + problem)
         st = self.state.setdefault(cid, {})
         st.setdefault("enabled", channel.default_enabled())
         st.setdefault("visible", True)
@@ -323,6 +343,9 @@ class PluginHost:
         if "exc" in box:
             exc = box["exc"]
             message = f"{type(exc).__name__}: {exc}"
+            where = _origin(exc)
+            if where:
+                message += f"  [{where}]"
             message = self.config.redact(message) if self.config is not None else redact_text(message)
             return self._record(cid, Result(Status.ERROR, message=message[:2048]))
 
@@ -374,7 +397,19 @@ class PluginHost:
                     else:
                         # The base adapter returns one complete update_streams list.
                         has_more = False
-            data = station_rows(raw_rows)
+            local = bool(getattr(channel, "local_files", False))
+            rejected: list[str] = []
+            ignored: set[str] = set()
+            columns = self.columns_for(cid)
+            data = station_rows(raw_rows, local=local, rejected=rejected, columns=columns, ignored=ignored)
+            note = ""
+            if ignored:
+                self._log(self.health[cid], "row extra value(s) ignored, not declared in extra_columns: "
+                          + ", ".join(sorted(ignored)[:8]))
+            if rejected:
+                first = rejected[0]
+                note = f"{len(rejected)} row(s) rejected from {cid}: {first}"
+                note = (self.config.redact(note) if self.config is not None else redact_text(note))[:512]
             safe_errors = tuple(
                 (self.config.redact(error[:2048]) if self.config is not None else redact_text(error[:2048]))[:512]
                 for error in errors[:50]
@@ -387,12 +422,12 @@ class PluginHost:
                                                 has_more=has_more, next_offset=next_offset,
                                                 complete=False, errors=safe_errors))
             if not data:
-                return self._record(cid, Result(Status.EMPTY, data=[], message="no results",
+                return self._record(cid, Result(Status.EMPTY, data=[], message=note or "no results",
                                                 has_more=has_more, next_offset=next_offset))
-            return self._record(cid, Result(Status.OK, data=data, has_more=has_more,
+            return self._record(cid, Result(Status.OK, data=data, message=note, has_more=has_more,
                                             next_offset=next_offset))
         elif method == "resolve_url":
-            if not isinstance(data, dict) or not valid_url(data.get("url")):
+            if not isinstance(data, dict) or not valid_url(data.get("url"), local=bool(getattr(channel, "local_files", False))):
                 return self._record(cid, Result(Status.ERROR, message="Plugin returned an invalid playback URL"))
         if not data:
             # reachable but empty/None/garbage-falsey -> degraded, not an error
@@ -405,6 +440,11 @@ class PluginHost:
         active[cid] -= 1
         (self._playback_slots if playback else self._regular_slots).release()
         self._slots.release()
+
+    def columns_for(self, cid: str) -> list[tuple[str, str, str]]:
+        """The validated extra table columns a channel declares: [(label, key, type)]."""
+        channel = self.channels.get(cid)
+        return valid_columns(getattr(channel, "extra_columns", ())) if channel is not None else []
 
     # convenience wrappers
     def categories(self, cid: str, **kw) -> Result:
@@ -425,8 +465,7 @@ class PluginHost:
         if result.status in (Status.ERROR, Status.TIMEOUT):
             h.consecutive_errors += 1
             h.error_count += 1
-            h.log.append(result.message)
-            del h.log[:-LOG_KEEP]
+            self._log(h, result.message)
             if h.consecutive_errors >= AUTO_DISABLE_THRESHOLD and not h.auto_disabled:
                 h.auto_disabled = True
                 self.state.setdefault(cid, {})["enabled"] = False
@@ -438,4 +477,18 @@ class PluginHost:
         else:
             h.consecutive_errors = 0
             h.ok_count += 1
+            if result.message and "rejected from" in result.message:
+                self._log(h, result.message)      # refused rows: not a failure, but authors need it
+            if result.status == Status.PARTIAL:
+                for error in result.errors[:5]:
+                    self._log(h, "partial: " + error)
         return result
+
+    @staticmethod
+    def _log(h: Health, message: str) -> None:
+        """Timestamped entry; an immediate repeat of the same message is skipped."""
+        if not message or message == h.last_logged:
+            return
+        h.last_logged = message
+        h.log.append(time.strftime("%H:%M:%S  ") + message)
+        del h.log[:-LOG_KEEP]
