@@ -294,6 +294,11 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QMenu::item {{ padding: 5px 26px 5px 14px; border-radius: 4px; }}
     QMenuBar::item:selected, QMenu::item:selected {{ background: {on}; color: {on_text}; }}
     QMenu::separator {{ height: 1px; background: {panel2}; margin: 5px 8px; }}
+    QMenu::item:disabled {{ color: rgba(140,140,140,0.95); }}
+    QMenu::indicator {{ width: 14px; height: 14px; margin-left: 6px; }}
+    QMenu::tearoff {{ height: 12px; margin: 2px 6px 5px 6px; background: {panel2};
+        border: 1px dashed rgba(140,140,140,0.65); border-radius: 4px; }}
+    QMenu::tearoff:selected {{ background: {on}; border-color: {on_text}; }}
     QComboBox QAbstractItemView {{ border: 1px solid rgb(120,120,120); background: {panel}; }}
     QStatusBar {{ background: {panel}; color: {text}; }}
     QLabel#paneHeader {{ background: {panel2}; color: {text}; padding: 5px 8px; font-weight: bold; }}
@@ -336,6 +341,11 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QScrollBar::handle:horizontal:hover {{ background: {scroll_hi}; }}
     QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; background: none; border: none; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{ background: {on}; }}
+    QAbstractScrollArea::corner {{ background: {bg}; border: none; }}
+    QLabel#findPill {{ background: {panel2}; color: {text}; border: 1px solid {on}; border-radius: 12px;
+        padding: 5px 14px; font-weight: 600; }}
+    QLabel#findPill[nomatch="true"] {{ border-color: rgb(205,95,95); color: rgb(232,128,128); }}
     QCheckBox {{ spacing: 8px; }}
     QTabBar::tab {{ background: {panel}; padding: 7px 14px; }}
     QTabBar::tab:selected {{ background: {on}; color: {on_text}; }}

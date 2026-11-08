@@ -64,6 +64,7 @@ Visit each provider’s website for its premium offerings. Use the provider’s 
 Playback, browsing, and customization features include:
 
 - **Search scopes**: Choose **Loaded list** to filter as you type, or **This source** / **All sources** to search supported catalogs with **Enter** or **Search**. Results arrive progressively, with a clear way back to your category.
+- **Station table**: Right-click a station, a column header or the empty list to choose which fields show (genre, bitrate, codec, listeners, votes, country, description, now playing, website, playlist type, source service, plus any a service adds). Each service keeps its own fields, widths and order, and can be reset on its own. Click a column, then type to jump to the first match in it. The list scrolls both ways, and every menu has a dashed bar you can click to tear it off and move it.
 - **Favorites & history**: Save stations, export favorites and station history as CSV, or import CSV into Favorites. Use JSON backups to restore settings and saved lists.
 - **Your own streams**: Use **Add station…** or **Ctrl+N** to save a named stream or paste multiple URLs, one per line. Find them under **Local → My Stations**; no plugin is needed.
 - **Twenty classic themes + your own**: Dark, Light, Dracula, Nord, Solarized (light and dark), Gruvbox (dark and light), Tokyo Night, Monokai Pro, Dark Pastels, Cyberpunk Neon, Ubuntu, xterm, Amber, Green Phosphor, White Phosphor, CGA, CRT, and Synthwave. Import or export custom JSON themes with the [theme guide](THEME-HOWTO.md).

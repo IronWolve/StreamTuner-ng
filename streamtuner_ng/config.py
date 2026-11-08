@@ -694,7 +694,8 @@ class Config:
                 if type(value) is typ and (typ is not str or len(value) <= 4096):
                     self.settings[key] = value
         columns = settings.get("visible_columns")
-        allowed_columns = {"title", "genre", "bitrate", "format", "listeners", "votes", "country", "description", "playing", "url"}
+        allowed_columns = {"title", "genre", "bitrate", "format", "listeners", "votes", "country", "description", "playing", "url",
+                           "homepage", "listformat", "source"}
         if isinstance(columns, list) and len(columns) <= len(allowed_columns):
             with self._write_lock:
                 self.settings["visible_columns"] = [name for name in columns if isinstance(name, str) and name in allowed_columns]

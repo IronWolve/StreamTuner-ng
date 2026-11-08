@@ -93,7 +93,14 @@ class StyledDialog(QDialog):
     # frameless windows can't be moved by a title bar -> let the card drag the dialog
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
+            handle = self.windowHandle()
+            if handle is not None and handle.startSystemMove():     # the window manager moves it (works on Wayland too)
+                self._drag = None
+                return
             self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
 
     def mouseMoveEvent(self, e):
         if self._drag is not None and (e.buttons() & Qt.LeftButton):

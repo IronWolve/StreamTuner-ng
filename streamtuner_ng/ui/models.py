@@ -25,7 +25,18 @@ COLUMNS = [
     ("Description", "description"),
     ("Now Playing", "playing"),
     ("URL", "url"),
+    ("Website", "homepage"),
+    ("Playlist", "listformat"),
+    ("Source", "source"),
 ]
+# Fields that stay off until the user turns them on (right-click the table or View > Columns):
+# the stream URL is long, the playlist type is technical, and the source service only helps in
+# lists that mix services (Favorites, Local, search results).
+DEFAULT_HIDDEN = frozenset({"url", "listformat", "source"})
+DEFAULT_WIDTH = 110
+DEFAULT_WIDTHS = {"title": 230, "genre": 100, "bitrate": 60, "format": 60, "listeners": 80, "votes": 65,
+                  "country": 95, "description": 200, "playing": 200, "url": 320, "homepage": 220,
+                  "listformat": 70, "source": 120}
 
 
 class StationModel(QAbstractTableModel):
@@ -40,6 +51,7 @@ class StationModel(QAbstractTableModel):
         self._types: dict[str, str] = {}                 # "x:<key>" -> text|int|float|date
         self.icon_provider = None    # callable(row) -> QIcon | None  (station favicon)
         self.fav_provider = None     # callable(url) -> bool          (is favourited)
+        self.source_provider = None  # callable(row) -> str           (service the row belongs to)
 
     def refresh_icons(self) -> None:
         if self._rows:
@@ -85,7 +97,46 @@ class StationModel(QAbstractTableModel):
         if key.startswith("x:"):
             extra = row.get("extra")
             return extra.get(key[2:], "") if isinstance(extra, dict) else ""
+        if key == "source":
+            return (self.source_provider(row) if self.source_provider else row.get("_source", "")) or ""
         return row.get(key, "")
+
+    def _display(self, row, key) -> str:
+        """The text a cell shows (also what type-ahead and the clipped-cell tooltip use)."""
+        val = self._value(row, key)
+        kind = self._types.get(key)
+        if kind:
+            if kind == "int":
+                return f"{val:,}" if isinstance(val, int) and not isinstance(val, bool) else str(val)
+            if kind == "float":
+                return f"{val:g}" if isinstance(val, (int, float)) else str(val)
+            return str(val)
+        if key in ("url", "homepage"):
+            return redact_url(val)
+        if key == "title":
+            title = str(val)
+            if self.fav_provider and self.fav_provider(row.get("url", "")):
+                return "★ " + title       # mark favourites (visible in History too)
+            return title
+        if key == "bitrate":
+            return f"{val}k" if val else ""
+        if key in ("votes", "listeners"):
+            return f"{val:,}" if val else ""
+        if key == "format":
+            return (val or "").replace("audio/", "")
+        if key == "listformat":
+            return str(val or "").upper()
+        return str(val)
+
+    def find_text(self, src_row: int, field: str) -> str:
+        """Lower-cased text of one cell for type-ahead: no favourite star, no thousands commas."""
+        row = self._rows[src_row]
+        text = self._display(row, field)
+        if field == "title":
+            text = text.removeprefix("★ ")
+        elif field in _NUMERIC or self._types.get(field) in ("int", "float"):
+            text = text.replace(",", "")
+        return text.casefold()
 
     def _index_rows(self, rows, start):
         for i, row in enumerate(rows, start):
@@ -94,7 +145,7 @@ class StationModel(QAbstractTableModel):
             self._mark_populated(row)
 
     def has_field(self, field):
-        return field == "title" or field in self._populated
+        return field in ("title", "source") or field in self._populated
 
     def contains_url(self, url):
         return url in self._positions
@@ -157,8 +208,12 @@ class StationModel(QAbstractTableModel):
         return len(self._cols)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self._cols[section][0]
+        if orientation == Qt.Horizontal and 0 <= section < len(self._cols):
+            if role == Qt.DisplayRole:
+                return self._cols[section][0]
+            if role == Qt.ToolTipRole:
+                return (f"{self._cols[section][0]}\nClick to sort · then type to jump to a row\n"
+                        "Right-click to choose fields · drag to reorder")
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -168,27 +223,7 @@ class StationModel(QAbstractTableModel):
         key = self._cols[index.column()][1]
         kind = self._types.get(key)
         if role == Qt.DisplayRole:
-            val = self._value(row, key)
-            if kind:
-                if kind == "int":
-                    return f"{val:,}" if isinstance(val, int) and not isinstance(val, bool) else str(val)
-                if kind == "float":
-                    return f"{val:g}" if isinstance(val, (int, float)) else str(val)
-                return str(val)
-            if key in ("url", "homepage"):
-                return redact_url(val)
-            if key == "title":
-                title = str(val)
-                if self.fav_provider and self.fav_provider(row.get("url", "")):
-                    return "★ " + title       # mark favourites (visible in History too)
-                return title
-            if key == "bitrate":
-                return f"{val}k" if val else ""
-            if key in ("votes", "listeners"):
-                return f"{val:,}" if val else ""
-            if key == "format":
-                return (val or "").replace("audio/", "")
-            return str(val)
+            return self._display(row, key)
         if role == Qt.DecorationRole and key == "title" and self.icon_provider is not None:
             return self.icon_provider(row)
         if role == SORT_ROLE:

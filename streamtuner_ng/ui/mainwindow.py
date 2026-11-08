@@ -13,7 +13,7 @@ from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QPushButton, QSlider, QSplitter, QTableView,
+    QListWidgetItem, QMainWindow, QMenu, QPushButton, QSlider, QSplitter,
     QToolBar, QVBoxLayout, QWidget,
 )
 
@@ -22,11 +22,24 @@ from ..player.mpv_player import clean_icy_title
 from ..plugins.result import Result, Status
 from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, redact_url, station_row, valid_url
 from . import theme
-from .models import COLUMNS, FILTER_ROLE, SORT_ROLE, StationModel
+from .models import COLUMNS, DEFAULT_HIDDEN, DEFAULT_WIDTH, DEFAULT_WIDTHS, FILTER_ROLE, SORT_ROLE, StationModel
+from .stationtable import StationTable
 from .spectrogram import Spectrogram
 from .vumeter import VuMeter
 from .worker import run_async, run_io, run_cache, run_playback, run_credentials
 from .cache import CatalogCache
+
+
+class StickyMenu(QMenu):
+    """A menu of check boxes that stays open while you tick several of them (Esc or a click
+    elsewhere closes it). Tear it off (the dashed bar at the top) to keep it as a small window."""
+
+    def mouseReleaseEvent(self, ev):
+        action = self.actionAt(ev.position().toPoint())
+        if action is not None and action.isCheckable() and action.isEnabled():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(ev)
 
 
 class MainWindow(QMainWindow):
@@ -200,19 +213,25 @@ class MainWindow(QMainWindow):
 
         self.categories = QListWidget()
         self.categories.currentItemChanged.connect(self._on_category)
+        for pane in (self.channels, self.categories):     # long names scroll sideways instead of clipping
+            pane.setTextElideMode(Qt.ElideNone)
+            pane.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+            pane.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            pane.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.categories.itemDoubleClicked.connect(self._reload_category)
 
         self.model = StationModel()
         bm = self.host.channels.get("bookmarks")
         self.model.fav_provider = bm.is_favourite if bm else None
         self.model.icon_provider = self._station_icon
+        self.model.source_provider = self._source_label
         self.proxy = QSortFilterProxyModel()
         self.proxy.setSourceModel(self.model)
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy.setFilterKeyColumn(0)
         self.proxy.setFilterRole(FILTER_ROLE)    # search matches name + genre + country
         self.proxy.setSortRole(SORT_ROLE)        # numeric columns sort numerically
-        self.table = QTableView()
+        self.table = StationTable()
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -222,9 +241,18 @@ class MainWindow(QMainWindow):
         hdr.setSectionsMovable(True)                        # drag headers to reorder
         hdr.setSectionResizeMode(QHeaderView.Interactive)   # drag edges to resize
         hdr.setStretchLastSection(True)                     # last column fills the gap
-        # Station Genre Bitrate Codec Listeners Votes Country Description NowPlaying URL
-        for col, w in enumerate((230, 100, 60, 60, 80, 65, 95, 200, 200, 320)):
-            self.table.setColumnWidth(col, w)
+        for col, (_label, field) in enumerate(self.model.columns()):
+            self.table.setColumnWidth(col, DEFAULT_WIDTHS.get(field, DEFAULT_WIDTH))
+        self._layout_applied = None                          # column set the saved widths/order were applied to
+        self._layout_applying = False
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.setInterval(300)
+        self._layout_timer.timeout.connect(self._save_column_layout)
+        hdr.sectionResized.connect(self._column_layout_changed)
+        hdr.sectionMoved.connect(self._column_layout_changed)
+        hdr.setContextMenuPolicy(Qt.CustomContextMenu)       # right-click a header: choose the fields
+        hdr.customContextMenuRequested.connect(self._header_menu)
         self.table.doubleClicked.connect(self._play_selected)
         self.table.clicked.connect(self._on_station_clicked)
         self.table.selectionModel().currentRowChanged.connect(lambda *_: self._sync_selection_actions())
@@ -458,8 +486,10 @@ class MainWindow(QMainWindow):
 
         m_view = mb.addMenu("&View")
         m_view.addAction(QAction("Reload current channel", self, shortcut="F5", triggered=self._reload))
-        self._columns_menu = m_view.addMenu("Columns")
+        self._columns_menu = StickyMenu("Columns", m_view)
+        m_view.addMenu(self._columns_menu)
         self._column_actions = {}
+        self._columns_sig = None
         self._columns_menu.aboutToShow.connect(self._rebuild_columns_menu)    # a service can add its own
         self._rebuild_columns_menu()
         self._art_action = QAction("Show album art", self, checkable=True)
@@ -501,6 +531,8 @@ class MainWindow(QMainWindow):
 
         m_help = mb.addMenu("&Help")
         m_help.addAction(QAction("About", self, triggered=self._about))
+        for menu in mb.findChildren(QMenu):         # every menu and sub-menu can be torn off and moved
+            menu.setTearOffEnabled(True)
 
     # ---- channel sidebar ----
     def _populate_channels(self) -> None:
@@ -1367,56 +1399,183 @@ class MainWindow(QMainWindow):
         return self.host.columns_for(cid) if cid and self.host.is_enabled(cid) else []
 
     def _sync_extra_columns(self, cid: str | None = None) -> bool:
-        return self.model.set_extra_columns(self._channel_columns(cid or self.current_channel))
+        changed = self.model.set_extra_columns(self._channel_columns(cid or self.current_channel))
+        if changed:
+            self.table.reset_find_column()
+            self._layout_applied = None
+        return changed
 
     def _hidden_extra(self, cid: str) -> set:
         hidden = self.config.get("hidden_extra_columns", {})
         keys = hidden.get(cid, []) if isinstance(hidden, dict) else []
         return {k for k in keys if isinstance(k, str)} if isinstance(keys, list) else set()
 
+    def _default_hidden(self) -> frozenset:
+        """Fields that start off. Source is useful where services mix, so those lists show it."""
+        if self.current_channel in ("bookmarks", "local") or self._search_active():
+            return DEFAULT_HIDDEN - {"source"}
+        return DEFAULT_HIDDEN
+
+    def _search_active(self) -> bool:
+        """Showing results from every service at once (Search scope: all services)."""
+        return bool(getattr(self, "_view_search", False)) and self.search_scope.currentIndex() == 2
+
+    def _column_wanted(self, field: str) -> bool:
+        """Is this field switched on (before checking that the list has any data for it)?"""
+        if field.startswith("x:"):
+            return field[2:] not in self._hidden_extra(self.current_channel)
+        if field == "title":
+            return True
+        own = self._overrides(self.current_channel)
+        if own is not None:                       # this feed has its own choices
+            return own.get(field, field not in self._default_hidden())
+        preferred = self.config.get("visible_columns", [])     # an older, global choice seeds feeds not yet customised
+        if preferred:
+            return field in preferred
+        return field not in self._default_hidden()
+
+    def _overrides(self, cid: str):
+        """This feed's own on/off choices for built-in fields ({} = defaults), or None if never customised."""
+        every = self.config.get("column_overrides", {})
+        own = every.get(cid) if isinstance(every, dict) else None
+        return {k: v for k, v in own.items() if isinstance(k, str) and isinstance(v, bool)} if isinstance(own, dict) else None
+
     def _rebuild_columns_menu(self) -> None:
         menu = self._columns_menu
-        menu.clear()
-        self._column_actions = {}
-        saved_columns = self.config.get("visible_columns", [])
+        if menu.isVisible():                        # never rebuild under the user's cursor
+            return
         columns = self.model.columns() if hasattr(self, "model") else list(COLUMNS)
-        hidden = self._hidden_extra(self.current_channel)
-        for label, field in columns:
-            extra = field.startswith("x:")
-            action = QAction(label, self, checkable=True)
-            action.setChecked((field[2:] not in hidden) if extra else
-                              (field == "title" or (field in saved_columns if saved_columns else field != "url")))
+        sig = tuple((field, self._column_wanted(field), self.model.has_field(field)) for _label, field in columns)
+        feed = self._feed_title()
+        if (sig, feed) == self._columns_sig and menu.actions():
+            return
+        self._columns_sig = (sig, feed)
+        menu.clear()                                # also deletes the old actions
+        self._column_actions = {}
+        menu.setToolTipsVisible(True)
+        heading = QAction(f"Fields for {feed}", menu)
+        heading.setEnabled(False)
+        menu.addAction(heading)
+        for (label, field), (_f, wanted, has_data) in zip(columns, sig):
+            action = QAction(label if has_data or field == "title" else f"{label}   · none here", menu, checkable=True)
+            action.setChecked(wanted)
             action.setEnabled(field != "title")
-            action.setToolTip("Added by this service" if extra else "Shown when this service supplies the field")
+            if field.startswith("x:"):
+                action.setToolTip("Added by this service")
+            elif not has_data:
+                action.setToolTip("This list has no values for this field yet")
             action.toggled.connect(lambda on, name=field: self._set_column_visible(name, on))
             menu.addAction(action)
             self._column_actions[field] = action
         menu.addSeparator()
-        menu.addAction(QAction("Reset columns", self, triggered=self._reset_columns))
+        menu.addAction(QAction("Fit columns to contents", menu, triggered=self._fit_columns))
+        menu.addAction(QAction(f"Reset {feed} to defaults", menu, triggered=self._reset_columns))
+
+    def _feed_title(self) -> str:
+        ch = self.host.channels.get(self.current_channel)
+        return (ch.title if ch else "") or "this list"
+
+    def _header_menu(self, pos) -> None:
+        self._columns_menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
 
     def _reset_columns(self) -> None:
-        self.config.set("visible_columns", [])
-        self.config.set("hidden_extra_columns", {})
+        """Back to the defaults for the feed being viewed; other feeds keep their own choices."""
+        cid = self.current_channel
+        self._store_for_feed("column_overrides", cid, {})        # {} = customised-but-default (ignores the old global list)
+        self._store_for_feed("hidden_extra_columns", cid, None)
+        self._store_for_feed("column_layout", cid, None)
         self.config.save_settings()
+        self._layout_applied = None
         self._apply_column_visibility()
-        self.statusBar().showMessage("Columns reset", 3000)
+        self.statusBar().showMessage(f"{self._feed_title()}: fields reset to defaults", 3000)
+
+    def _store_for_feed(self, key: str, cid: str, value) -> None:
+        """Set (or, with None, remove) one feed's entry in a per-feed settings dict."""
+        every = self.config.get(key, {})
+        every = dict(every) if isinstance(every, dict) else {}
+        if value is None:
+            every.pop(cid, None)
+        else:
+            every[cid] = value
+        self.config.set(key, every)
+
+    def _fit_columns(self) -> None:
+        hdr = self.table.horizontalHeader()
+        for col in range(hdr.count()):
+            if not hdr.isSectionHidden(col):
+                self.table.resizeColumnToContents(col)
+                self.table.setColumnWidth(col, max(48, min(self.table.columnWidth(col) + 6, 460)))
+        self.statusBar().showMessage("Columns fitted to their contents", 3000)
+
+    def _source_label(self, row: dict) -> str:
+        src = self._resolve_source(row)
+        if src == "bookmarks" and not row.get("_source"):
+            return ""                              # an old entry that never recorded its service
+        ch = self.host.channels.get(src)
+        return ch.title if ch else ""
 
     def _apply_column_visibility(self) -> None:
         self._sync_extra_columns()
         if not self.model.rowCount():
+            self._rebuild_columns_menu()          # the field list still follows the feed being viewed
             return
-        preferred = self.config.get("visible_columns", [])
-        hidden = self._hidden_extra(self.current_channel)
-        for col, (_label, field) in enumerate(self.model.columns()):
-            visible = self.model.has_field(field)
-            if field.startswith("x:"):
-                visible = visible and field[2:] not in hidden
-            else:
-                if field == "url" and not preferred:
-                    visible = False
-                if preferred:
-                    visible = visible and (field == "title" or field in preferred)
-            self.table.setColumnHidden(col, not visible)
+        self._layout_applying = True
+        try:
+            for col, (_label, field) in enumerate(self.model.columns()):
+                self.table.setColumnHidden(col, not (self.model.has_field(field) and self._column_wanted(field)))
+            self._apply_column_layout()
+        finally:
+            self._layout_applying = False
+        self._rebuild_columns_menu()
+
+    # ---- remembered widths and order, by field name (so they survive switching services) ----
+    def _stored_layout(self) -> dict:
+        every = self.config.get("column_layout", {})
+        own = every.get(self.current_channel) if isinstance(every, dict) else None
+        return own if isinstance(own, dict) else {}
+
+    def _apply_column_layout(self) -> None:
+        fields = [field for _label, field in self.model.columns()]
+        signature = (self.current_channel, tuple(fields))
+        if self._layout_applied == signature:
+            return
+        self._layout_applied = signature
+        stored = self._stored_layout()
+        widths = stored.get("widths") if isinstance(stored.get("widths"), dict) else {}
+        order = stored.get("order") if isinstance(stored.get("order"), list) else []
+        hdr = self.table.horizontalHeader()
+        wanted = [f for f in order if f in fields] + [f for f in fields if f not in order]
+        for visual, field in enumerate(wanted):
+            hdr.moveSection(hdr.visualIndex(fields.index(field)), visual)
+        for col, field in enumerate(fields):
+            width = widths.get(field)
+            width = width if isinstance(width, int) and 24 <= width <= 2000 else DEFAULT_WIDTHS.get(field, DEFAULT_WIDTH)
+            if not hdr.isSectionHidden(col):
+                hdr.resizeSection(col, width)
+
+    def _column_layout_changed(self, *_args) -> None:
+        if not self._layout_applying:
+            self._layout_timer.start()
+
+    def _save_column_layout(self) -> None:
+        fields = [field for _label, field in self.model.columns()]
+        hdr = self.table.horizontalHeader()
+        if not fields or hdr.count() != len(fields) or self._layout_applied != (self.current_channel, tuple(fields)):
+            return
+        stored = self._stored_layout()
+        widths = dict(stored.get("widths") or {}) if isinstance(stored.get("widths"), dict) else {}
+        last = next((hdr.logicalIndex(v) for v in range(hdr.count() - 1, -1, -1)
+                     if not hdr.isSectionHidden(hdr.logicalIndex(v))), -1)
+        for col, field in enumerate(fields):
+            if col != last and not hdr.isSectionHidden(col):      # the last column is stretched, not sized
+                widths[field] = hdr.sectionSize(col)
+        shown = [fields[hdr.logicalIndex(v)] for v in range(hdr.count())]
+        old = stored.get("order") if isinstance(stored.get("order"), list) else []
+        order = shown + [f for f in old if f not in shown]
+        layout = {"widths": widths, "order": order}
+        if layout != stored:
+            self._store_for_feed("column_layout", self.current_channel, layout)
+            self.config.save_settings()
 
 
     def _selected_row(self) -> dict | None:
@@ -1439,10 +1598,9 @@ class MainWindow(QMainWindow):
 
     def _station_menu(self, pos) -> None:
         idx = self.table.indexAt(pos)
-        if not idx.isValid():
-            return
-        row = self.model.row_at(self.proxy.mapToSource(idx).row())
-        if not row:
+        row = self.model.row_at(self.proxy.mapToSource(idx).row()) if idx.isValid() else None
+        if not row:                                   # empty space below the rows: just the field chooser
+            self._columns_menu.exec(self.table.viewport().mapToGlobal(pos))
             return
         row = dict(row)
         row.setdefault("_source", self._resolve_source(row))
@@ -1460,6 +1618,9 @@ class MainWindow(QMainWindow):
         if row.get("homepage"):
             menu.addAction("Open Website",
                            lambda: self._open_website(row["homepage"]))
+        menu.addSeparator()
+        self._rebuild_columns_menu()
+        menu.addMenu(self._columns_menu)              # choose the fields (a tear-off lets you keep it open)
         try:
             menu.exec(self.table.viewport().mapToGlobal(pos))
         finally:
@@ -2895,15 +3056,12 @@ class MainWindow(QMainWindow):
             self.config.save_settings()
             self._apply_column_visibility()
             return
-        current = self.config.get("visible_columns", [])
-        valid = {name for _label, name in COLUMNS}
-        chosen = {name for name in current if isinstance(name, str) and name in valid} if current else valid - {"url"}
-        if enabled:
-            chosen.add(field)
-        else:
-            chosen.discard(field)
-        chosen.add("title")
-        self.config.set("visible_columns", [name for _label, name in COLUMNS if name in chosen])
+        cid = self.current_channel
+        own = self._overrides(cid)
+        if own is None:                           # first change for this feed: start from what it shows now
+            own = {name: self._column_wanted(name) for _label, name in COLUMNS if name != "title"}
+        own[field] = bool(enabled)
+        self._store_for_feed("column_overrides", cid, own)
         self.config.save_settings()
         self._apply_column_visibility()
 

@@ -150,7 +150,7 @@ class MyRadio(Channel):
   plugin's View Log. A bad declaration is logged the same way.
 - `default_sort = "year"` can name an extra column.
 - Extra values are saved with the station (cache, Favorites, history, backups) and written to CSV
-  export; CSV import ignores them. In **View → Columns** users can hide any column or reset them.
+  export; CSV import ignores them. Users choose fields from **View → Columns** or by right-clicking the list or a column header (hide, fit to contents, reset); the choice, widths and order are remembered separately for each service.
   Favorites and Local show the columns of every enabled service.
 
 ## Rejected rows and compatibility
