@@ -21,6 +21,9 @@ class Jamendo(Channel):
     homepage = "https://www.jamendo.com/"
     priority = "standard"
     icon_emoji = "🎵"
+    row_fields = ('format',)
+    extra_columns = [("Radio ID", "radio_id", "int"), ("Type", "kind")]
+    extra_columns_hidden = ("radio_id", "kind")
 
     def update_categories(self) -> list[str]:
         return ["Radios"]
@@ -54,7 +57,7 @@ class Jamendo(Channel):
             rows.append(make_row(
                 title=name,
                 url=url,                              # streaming.jamendo.com/Jam<Name> — direct mp3
-                genre="Jamendo",
+                extra={"radio_id": rd.get("id"), "kind": rd.get("type")},
                 favicon=rd.get("image") or res.get("image") or "",
                 format="audio/mpeg",
                 listformat="url",

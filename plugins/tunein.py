@@ -29,8 +29,11 @@ class TuneIn(Channel):
     priority = "standard"
     has_search = True
     needs_resolve = True
+    row_fields = ('bitrate', 'format', 'description', 'playing')
     category_pins = ("Local Radio", "All Music", "Talk", "Sports")  # top; genres sort A–Z
     all_category = "All Music"   # = union of the genre sweep + every browsed genre
+    extra_columns = [("Reliability %", "reliability", "int"), ("Formats", "formats"), ("TuneIn ID", "tunein_id")]
+    extra_columns_hidden = ("formats", "tunein_id")
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -95,10 +98,13 @@ class TuneIn(Channel):
                 title=html.unescape(a.get("text", "")),
                 url=u,
                 description=html.unescape(a.get("subtext", "")),   # subtext = slogan/show, not a song
+                playing=html.unescape(a.get("playing", "")),
                 bitrate=a.get("bitrate") or 0,  # the host safely normalizes optional numeric fields
                 format=_FMT.get(fmt, "audio/mpeg"),
                 favicon=html.unescape(a.get("image", "")),
                 listformat="tunein",
+                extra={"reliability": a.get("reliability"), "formats": a.get("formats", ""),
+                       "tunein_id": a.get("guide_id", "")},
             ))
         links = [dict(_ATTR.findall(m)) for m in re.findall(r'<outline\b[^>]*type="link"[^>]*>', xml)]
         # 1) pagination — follow the station-list "More Stations" (NOT "More Shows")

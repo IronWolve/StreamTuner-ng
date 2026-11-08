@@ -37,6 +37,9 @@ class RadioParadise(Channel):
     homepage = "https://radioparadise.com/"
     priority = "standard"
     icon_emoji = "🎵"
+    row_fields = ('bitrate', 'format', 'listeners')
+    extra_columns = [("Quality", "quality"), ("Channel", "rp_channel", "int"), ("Type", "kind")]
+    extra_columns_hidden = ("rp_channel", "kind")
 
     def update_categories(self) -> list[str]:
         return ["Channels"]
@@ -69,10 +72,12 @@ class RadioParadise(Channel):
                 rows.append(make_row(
                     title=title,
                     url=STREAM + path,
-                    genre="Radio Paradise",
                     listeners=listeners,
+                    bitrate=int(q) if q.isdigit() else 0,
                     format=mime,
+                    favicon=c.get("image") or "",
                     listformat="url",
+                    extra={"quality": label, "rp_channel": c.get("chan"), "kind": c.get("type")},
                 ))
         rows.sort(key=lambda r: r["title"].lower())
         return rows

@@ -143,15 +143,25 @@ class MyRadio(Channel):
 
 - **Type** is `text` (default), `int`, `float` or `date` (ISO text such as `2026-11-05`). It decides
   sorting (numbers sort as numbers), alignment and formatting.
-- **Limits:** at most 8 columns; the label is 1-24 characters; the key is lowercase letters, digits
+- **Limits:** at most 16 columns; the label is 1-24 characters; the key is lowercase letters, digits
   and `_` (max 24), not a built-in field name and not credential-like (`token`, `key`, …). Text is
   capped at 256 characters and shown as plain text.
 - **Only declared keys are kept.** A value for a key you did not declare is dropped and noted in the
   plugin's View Log. A bad declaration is logged the same way.
 - `default_sort = "year"` can name an extra column.
+- **Say what you supply:** `row_fields = ("genre", "bitrate", "country")` lists the built-in fields
+  (`genre`, `bitrate`, `format`, `listeners`, `votes`, `country`, `description`, `playing`, `homepage`)
+  your service really fills. Only those, plus Station, URL, Playlist and Source, appear in your
+  service's Columns menu and Fields window; leave a field out if your source never provides it. A
+  plugin that doesn't set `row_fields` keeps offering all of them.
+- **Secondary fields:** list keys in `extra_columns_hidden = ("modified",)` to offer a field without
+  showing it by default; users tick it on from the Columns menu. Return every field your source
+  gives you; hide the ones most people won't want.
+- **Reuse a key** only when it means the same thing and has the same type in every plugin
+  (`language`, `state`): Favorites and Local pool the declarations of all services.
 - Extra values are saved with the station (cache, Favorites, history, backups) and written to CSV
   export; CSV import ignores them. Users choose fields from **View → Columns** or by right-clicking the list or a column header (hide, fit to contents, reset); the choice, widths and order are remembered separately for each service.
-  Favorites and Local show the columns of every enabled service.
+  Favorites and Local offer the extras (of any enabled service) that their saved stations carry.
 
 ## Rejected rows and compatibility
 
@@ -160,7 +170,8 @@ message such as `2 row(s) rejected from myradio: unsupported URL scheme 'file' (
 on the plugin to allow file://)`, so a plugin author can see why a list is short.
 
 `PLUGIN_API` in `streamtuner_ng.plugins.base` is the plugin-contract revision. Plugins written against
-an earlier revision keep working; anything that tightens what a plugin may return is announced in the
+an earlier revision keep working (revision 4 raised the extra-column limit from 8 to 16 and added
+`extra_columns_hidden` and `row_fields`); anything that tightens what a plugin may return is announced in the
 release notes first.
 
 ## Paged results and refresh

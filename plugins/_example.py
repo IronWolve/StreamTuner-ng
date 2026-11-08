@@ -106,6 +106,8 @@ class ExampleRadio(Channel):
 #  Want more columns? Declare them and fill them per row (see PLUGINS.md "Extra columns"):
 #
 #        extra_columns = [("Size", "size", "int"), ("Modified", "modified", "date")]
+#        extra_columns_hidden = ("modified",)    # offered in the Columns menu, but off until ticked
+#        row_fields = ("genre",)                  # built-in columns this service really fills (the rest are not offered)
 #        ...
 #        rows.append(make_row(title=f.stem, url=f.as_uri(), genre=category,
 #                             extra={"size": f.stat().st_size, "modified": "2026-11-05"}))

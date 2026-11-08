@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import time
+
 from ...net import http
 from ..base import Channel, make_row
 
 FEED = "https://somafm.com/channels.json"
 _QUALITY_RANK = {"highest": 3, "high": 2, "low": 1}
 _FMT_MIME = {"mp3": "audio/mpeg", "aac": "audio/aac", "aacp": "audio/aac"}
+_FMT_LABEL = {"mp3": "MP3", "aac": "AAC", "aacp": "AAC+"}
 
 
 class SomaFM(Channel):
@@ -17,7 +20,10 @@ class SomaFM(Channel):
     description = "Listener-supported, commercial-free, underground/independent radio."
     homepage = "https://somafm.com/"
     priority = "standard"      # on by default
+    row_fields = ('genre', 'format', 'listeners', 'description', 'playing', 'homepage')
     category_pins = ("All",)   # "All" on top; genres sort A–Z
+    extra_columns = [("DJ", "dj"), ("Updated", "updated", "date"), ("Streams", "streams")]
+    extra_columns_hidden = ("updated", "streams")
     all_category = "All"
 
     def __init__(self, config=None):
@@ -76,6 +82,12 @@ class SomaFM(Channel):
             if search and search.lower() not in (c.get("title", "") + c.get("description", "")).lower():
                 continue
             url, mime = self._best_playlist(c)
+            formats = list(dict.fromkeys(_FMT_LABEL.get(p.get("format"), "") for p in c.get("playlists", [])
+                                         if isinstance(p, dict)))
+            try:
+                updated = time.strftime("%Y-%m-%d", time.gmtime(int(c.get("updated"))))
+            except (TypeError, ValueError, OverflowError, OSError):
+                updated = ""
             rows.append(make_row(
                 title=c.get("title", ""),
                 url=url,
@@ -83,8 +95,10 @@ class SomaFM(Channel):
                 favicon=c.get("image", ""),
                 genre=genre,
                 description=c.get("description", ""),   # SomaFM tagline, not a song
+                playing=c.get("lastPlaying", "") or "",
                 listeners=c.get("listeners") or 0,  # normalized safely at the host boundary
                 format=mime,
                 listformat="pls",
+                extra={"dj": c.get("dj"), "updated": updated, "streams": ", ".join(f for f in formats if f)},
             ))
         return rows

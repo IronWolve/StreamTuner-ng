@@ -19,7 +19,7 @@ from typing import Any
 
 from .base import Channel
 from .result import Page, Result, Status
-from ..security import MAX_ROWS, redact_text, station_rows, valid_columns, valid_id, valid_url
+from ..security import MAX_ROWS, redact_text, station_rows, valid_columns, valid_id, valid_row_fields, valid_url
 
 DEFAULT_TIMEOUT = 12.0
 AUTO_DISABLE_THRESHOLD = 3      # consecutive errors before we trip a plugin off
@@ -235,6 +235,10 @@ class PluginHost:
         valid_columns(getattr(channel, "extra_columns", ()), problems)
         for problem in problems[:5]:
             self._log(self.health[cid], "extra_columns: " + problem)
+        problems = []
+        valid_row_fields(getattr(channel, "row_fields", None), problems)
+        for problem in problems[:5]:
+            self._log(self.health[cid], "row_fields: " + problem)
         st = self.state.setdefault(cid, {})
         st.setdefault("enabled", channel.default_enabled())
         st.setdefault("visible", True)
@@ -445,6 +449,11 @@ class PluginHost:
         """The validated extra table columns a channel declares: [(label, key, type)]."""
         channel = self.channels.get(cid)
         return valid_columns(getattr(channel, "extra_columns", ())) if channel is not None else []
+
+    def fields_for(self, cid: str) -> tuple | None:
+        """Built-in table fields a channel says it supplies (None = not declared, offer them all)."""
+        channel = self.channels.get(cid)
+        return valid_row_fields(getattr(channel, "row_fields", None)) if channel is not None else None
 
     # convenience wrappers
     def categories(self, cid: str, **kw) -> Result:

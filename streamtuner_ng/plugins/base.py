@@ -21,7 +21,8 @@ _SNAPSHOT_INIT_LOCK = threading.Lock()
 
 # Plugin API revision. Bump it (and note it in PLUGINS.md and the release notes) whenever
 # the plugin-facing contract changes: Channel attributes, row fields, accepted URL schemes.
-PLUGIN_API = 3   # 3: declared `extra_columns` + row `extra`; 2: opt-in `local_files`, rejected-row reporting
+PLUGIN_API = 4   # 4: up to 16 `extra_columns`, `extra_columns_hidden`, `row_fields`; 3: declared `extra_columns` + row `extra`;
+                 # 2: opt-in `local_files`, rejected-row reporting
 
 # The station row schema. title + url are required; the rest have sane defaults.
 ROW_DEFAULTS: dict[str, Any] = {
@@ -85,7 +86,10 @@ class Channel:
     test_only: bool = False      # hidden helper plugins (e.g. selftest fakes)
     extra_columns: list = []     # extra table columns, e.g. [("Year", "year", "int"), ("Language", "language")]
                                  # entries are (label, key[, type]); type = text|int|float|date. Rows fill
-                                 # them with make_row(..., extra={"year": 1999}). At most 8, see PLUGINS.md.
+                                 # them with make_row(..., extra={"year": 1999}). At most 16, see PLUGINS.md.
+    row_fields: tuple | None = None   # built-in table fields this service really supplies, e.g. ("genre", "bitrate");
+                                      # only those are offered in its column list. None = offer them all.
+    extra_columns_hidden: tuple = ()  # keys of extra_columns that start switched off (the user ticks them on)
     local_files: bool = False    # opt in: rows may use file:// URLs (local PLS/M3U/audio files) and
                                  # a file:// directory `homepage` opens in the file manager
 

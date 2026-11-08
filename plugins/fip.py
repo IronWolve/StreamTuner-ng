@@ -30,6 +30,7 @@ class Fip(Channel):
     homepage = "https://www.fip.fr/"
     priority = "standard"
     icon_emoji = "🎶"
+    row_fields = ('country', 'format')
 
     def update_categories(self) -> list[str]:
         return ["Channels"]
@@ -40,6 +41,6 @@ class Fip(Channel):
             if search and search.lower() not in name.lower():
                 continue
             rows.append(make_row(title=name, url=STREAM.format(mount),
-                                 genre="FIP", country="France",
+                                 country="France",
                                  format="audio/mpeg", listformat="url"))
         return rows

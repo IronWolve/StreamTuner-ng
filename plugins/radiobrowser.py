@@ -27,9 +27,14 @@ class RadioBrowser(Channel):
     description = "Community directory, ~50k stations, open API, no key."
     homepage = "https://www.radio-browser.info/"
     priority = "core"          # on by default
+    row_fields = ('genre', 'bitrate', 'format', 'listeners', 'votes', 'country', 'homepage')
     has_search = True
     # Extra table columns (PLUGINS.md "Extra columns"): radio-browser reports these per station.
-    extra_columns = [("Language", "language"), ("State", "state")]
+    extra_columns = [("Language", "language"), ("State", "state"), ("Trend", "trend", "int"),
+                     ("Country code", "country_code"), ("Region", "region"),
+                     ("Checked", "checked", "date"), ("Changed", "changed", "date"),
+                     ("Last click", "last_click", "date"), ("HLS", "hls"), ("Location", "location")]
+    extra_columns_hidden = ("country_code", "region", "checked", "changed", "last_click", "hls", "location")
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -127,6 +132,18 @@ class RadioBrowser(Channel):
         return ", ".join(p.strip().title() for p in value.split(",") if p.strip()) if isinstance(value, str) else ""
 
     @staticmethod
+    def _date(value) -> str:
+        """"2026-11-06T18:02:59Z" -> "2026-11-06"."""
+        return value[:10] if isinstance(value, str) and re.match(r"\d{4}-\d{2}-\d{2}", value) else ""
+
+    @staticmethod
+    def _location(s: dict) -> str:
+        lat, lon = s.get("geo_lat"), s.get("geo_long")
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)):
+            return f"{lat:.3f}, {lon:.3f}"
+        return ""
+
+    @staticmethod
     def _map(data) -> list[dict]:
         rows = []
         for s in data:
@@ -146,7 +163,13 @@ class RadioBrowser(Channel):
                 bitrate=s.get("bitrate") or 0,
                 format=f"audio/{codec}" if codec else "",
                 listformat="srv",   # RadioBrowser gives direct/resolved stream URLs
-                extra={"language": RadioBrowser._language(s.get("language")), "state": s.get("state")},
+                extra={"language": RadioBrowser._language(s.get("language")), "state": s.get("state"),
+                       "trend": s.get("clicktrend"), "country_code": s.get("countrycode"),
+                       "region": s.get("iso_3166_2"),
+                       "checked": RadioBrowser._date(s.get("lastchecktime_iso8601")),
+                       "changed": RadioBrowser._date(s.get("lastchangetime_iso8601")),
+                       "last_click": RadioBrowser._date(s.get("clicktimestamp_iso8601")),
+                       "hls": "Yes" if s.get("hls") else "", "location": RadioBrowser._location(s)},
             ))
         return rows
 

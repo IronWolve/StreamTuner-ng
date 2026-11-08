@@ -243,6 +243,7 @@ class MainWindow(QMainWindow):
         hdr.setStretchLastSection(True)                     # last column fills the gap
         for col, (_label, field) in enumerate(self.model.columns()):
             self.table.setColumnWidth(col, DEFAULT_WIDTHS.get(field, DEFAULT_WIDTH))
+        self._columns_panel = None                           # the movable "Fields" window, created on first use
         self._layout_applied = None                          # column set the saved widths/order were applied to
         self._layout_applying = False
         self._layout_timer = QTimer(self)
@@ -251,6 +252,7 @@ class MainWindow(QMainWindow):
         self._layout_timer.timeout.connect(self._save_column_layout)
         hdr.sectionResized.connect(self._column_layout_changed)
         hdr.sectionMoved.connect(self._column_layout_changed)
+        hdr.sectionMoved.connect(lambda *_: self._refresh_columns_panel())
         hdr.setContextMenuPolicy(Qt.CustomContextMenu)       # right-click a header: choose the fields
         hdr.customContextMenuRequested.connect(self._header_menu)
         self.table.doubleClicked.connect(self._play_selected)
@@ -531,8 +533,6 @@ class MainWindow(QMainWindow):
 
         m_help = mb.addMenu("&Help")
         m_help.addAction(QAction("About", self, triggered=self._about))
-        for menu in mb.findChildren(QMenu):         # every menu and sub-menu can be torn off and moved
-            menu.setTearOffEnabled(True)
 
     # ---- channel sidebar ----
     def _populate_channels(self) -> None:
@@ -1056,6 +1056,8 @@ class MainWindow(QMainWindow):
         self._search_query = None
         self.search.clear()
         self.model.set_rows([])
+        self._sync_extra_columns()               # the table and the Columns menu follow this feed at once,
+        self._rebuild_columns_menu()             # not after its first list loads
         self.categories.clear()
         cid, generation = self.current_channel, self._channel_gen
         self._refresh_dot(cid)
@@ -1383,20 +1385,42 @@ class MainWindow(QMainWindow):
                     seen[row["url"]] = row
         return list(seen.values())
 
+    def _saved_extra_keys(self, cid: str) -> set:
+        """Extra-field names carried by the stations saved in Favorites (and history) or Local."""
+        ch = self.host.channels.get(cid)
+        rows = (list(getattr(ch, "favourite", []) or []) + list(getattr(ch, "history", []) or [])
+                if cid == "bookmarks" else list(getattr(ch, "_rows", []) or []))
+        keys: set = set()
+        for row in rows:
+            extra = row.get("extra") if isinstance(row, dict) else None
+            if isinstance(extra, dict):
+                keys.update(k for k in extra if isinstance(k, str))
+        return keys
+
     def _channel_columns(self, cid: str) -> list:
-        """Extra columns for the viewed channel. Favorites and Local hold rows from many services,
-        so they offer the columns of every enabled service (first declaration of a key wins)."""
+        """Extra columns for the viewed channel. Favorites and Local hold stations from many services,
+        so they offer the extras (of every enabled service) that their saved stations carry."""
         if cid in ("bookmarks", "local"):
+            used = self._saved_extra_keys(cid)
             seen, out = set(), []
             for other in self.host.channels:
                 if other in ("bookmarks", "local") or not self.host.is_enabled(other):
                     continue
                 for item in self.host.columns_for(other):
-                    if item[1] not in seen and len(out) < 12:
+                    if item[1] in used and item[1] not in seen and len(out) < 32:
                         seen.add(item[1])
                         out.append(item)
             return out
         return self.host.columns_for(cid) if cid and self.host.is_enabled(cid) else []
+
+    def _extra_starts_hidden(self, cid: str) -> set:
+        """Extra fields a service marks as secondary (off until ticked); Favorites/Local pool them."""
+        if cid in ("bookmarks", "local"):
+            return {k for other, ch in self.host.channels.items()
+                    if other not in ("bookmarks", "local") and self.host.is_enabled(other)
+                    for k in getattr(ch, "extra_columns_hidden", ()) if isinstance(k, str)}
+        ch = self.host.channels.get(cid)
+        return {k for k in getattr(ch, "extra_columns_hidden", ()) if isinstance(k, str)}
 
     def _sync_extra_columns(self, cid: str | None = None) -> bool:
         changed = self.model.set_extra_columns(self._channel_columns(cid or self.current_channel))
@@ -1404,6 +1428,11 @@ class MainWindow(QMainWindow):
             self.table.reset_find_column()
             self._layout_applied = None
         return changed
+
+    def _shown_extra(self, cid: str) -> set:
+        shown = self.config.get("shown_extra_columns", {})
+        keys = shown.get(cid, []) if isinstance(shown, dict) else []
+        return {k for k in keys if isinstance(k, str)} if isinstance(keys, list) else set()
 
     def _hidden_extra(self, cid: str) -> set:
         hidden = self.config.get("hidden_extra_columns", {})
@@ -1423,9 +1452,15 @@ class MainWindow(QMainWindow):
     def _column_wanted(self, field: str) -> bool:
         """Is this field switched on (before checking that the list has any data for it)?"""
         if field.startswith("x:"):
-            return field[2:] not in self._hidden_extra(self.current_channel)
+            key, cid = field[2:], self.current_channel
+            if key in self._extra_starts_hidden(cid):        # secondary field: shown only once ticked
+                return key in self._shown_extra(cid)
+            return key not in self._hidden_extra(cid)
         if field == "title":
             return True
+        offered = self._offered_builtins()
+        if offered is not None and field not in offered:     # this feed never supplies it
+            return False
         own = self._overrides(self.current_channel)
         if own is not None:                       # this feed has its own choices
             return own.get(field, field not in self._default_hidden())
@@ -1444,8 +1479,10 @@ class MainWindow(QMainWindow):
         menu = self._columns_menu
         if menu.isVisible():                        # never rebuild under the user's cursor
             return
-        columns = self.model.columns() if hasattr(self, "model") else list(COLUMNS)
-        sig = tuple((field, self._column_wanted(field), self.model.has_field(field)) for _label, field in columns)
+        columns = self._feed_columns()
+        loaded = bool(self.model.rowCount())     # with nothing loaded yet we cannot say a field is empty
+        sig = tuple((field, self._column_wanted(field), (not loaded) or self.model.has_field(field))
+                    for _label, field in columns)
         feed = self._feed_title()
         if (sig, feed) == self._columns_sig and menu.actions():
             return
@@ -1468,12 +1505,71 @@ class MainWindow(QMainWindow):
             menu.addAction(action)
             self._column_actions[field] = action
         menu.addSeparator()
+        menu.addAction(QAction("Fields window…   drag to reorder", menu, triggered=self._open_columns_panel))
         menu.addAction(QAction("Fit columns to contents", menu, triggered=self._fit_columns))
         menu.addAction(QAction(f"Reset {feed} to defaults", menu, triggered=self._reset_columns))
+        self._refresh_columns_panel()
+
+    _ALWAYS_OFFERED = frozenset({"title", "url", "listformat", "source"})
+
+    def _offered_builtins(self):
+        """Built-in fields offered for the viewed feed, or None for all (Favorites, Local, all-service
+        search, and plugins that don't say what they supply)."""
+        cid = self.current_channel
+        if cid in ("bookmarks", "local") or self._search_active():
+            return None
+        declared = self.host.fields_for(cid)
+        return None if declared is None else self._ALWAYS_OFFERED | set(declared)
+
+    def _feed_columns(self) -> list:
+        """Every field this feed can show: the built-ins it supplies plus the extras it declares."""
+        offered = self._offered_builtins()
+        return ([c for c in COLUMNS if offered is None or c[1] in offered]
+                + [(label, "x:" + key) for label, key, _kind in self._channel_columns(self.current_channel)])
 
     def _feed_title(self) -> str:
         ch = self.host.channels.get(self.current_channel)
         return (ch.title if ch else "") or "this list"
+
+    def _open_columns_panel(self) -> None:
+        from PySide6.QtCore import QPoint
+        from .columnspanel import ColumnsPanel
+        first = self._columns_panel is None
+        if first:
+            self._columns_panel = ColumnsPanel(self)
+        panel = self._columns_panel
+        panel.refresh()
+        if first:
+            panel.move(self.mapToGlobal(QPoint(max(0, self.width() - panel.width() - 40), 150)))
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    def _refresh_columns_panel(self) -> None:
+        if self._columns_panel is not None and self._columns_panel.isVisible():
+            self._columns_panel.refresh()
+
+    def _panel_fields(self) -> list:
+        """[(label, field, shown, has_data)] for the feed being viewed, in the table's current column order."""
+        feed = self._feed_columns()
+        labels = {field: label for label, field in feed}
+        model_fields = [field for _label, field in self.model.columns()]
+        hdr = self.table.horizontalHeader()
+        if hdr.count() == len(model_fields) and set(labels) <= set(model_fields):
+            order = sorted((f for f in model_fields if f in labels), key=lambda f: hdr.visualIndex(model_fields.index(f)))
+        else:
+            order = [field for _label, field in feed]
+        loaded = bool(self.model.rowCount())
+        return [(labels[f], f, self._column_wanted(f), (not loaded) or self.model.has_field(f)) for f in order]
+
+    def _set_column_order(self, order: list) -> None:
+        """Put the columns in this field order (the Fields window's drag and drop)."""
+        model_fields = [field for _label, field in self.model.columns()]
+        hdr = self.table.horizontalHeader()
+        if hdr.count() != len(model_fields):
+            return
+        for visual, field in enumerate(f for f in order if f in model_fields):
+            hdr.moveSection(hdr.visualIndex(model_fields.index(field)), visual)
 
     def _header_menu(self, pos) -> None:
         self._columns_menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
@@ -1483,6 +1579,7 @@ class MainWindow(QMainWindow):
         cid = self.current_channel
         self._store_for_feed("column_overrides", cid, {})        # {} = customised-but-default (ignores the old global list)
         self._store_for_feed("hidden_extra_columns", cid, None)
+        self._store_for_feed("shown_extra_columns", cid, None)
         self._store_for_feed("column_layout", cid, None)
         self.config.save_settings()
         self._layout_applied = None
@@ -3047,12 +3144,15 @@ class MainWindow(QMainWindow):
 
     def _set_column_visible(self, field, enabled):
         if field.startswith("x:"):
-            hidden_map = self.config.get("hidden_extra_columns", {})
-            hidden_map = dict(hidden_map) if isinstance(hidden_map, dict) else {}
-            keys = self._hidden_extra(self.current_channel)
-            keys.discard(field[2:]) if enabled else keys.add(field[2:])
-            hidden_map[self.current_channel] = sorted(keys)
-            self.config.set("hidden_extra_columns", hidden_map)
+            key, cid = field[2:], self.current_channel
+            if key in self._extra_starts_hidden(cid):                # secondary: remember what was ticked on
+                keys = self._shown_extra(cid)
+                keys.add(key) if enabled else keys.discard(key)
+                self._store_for_feed("shown_extra_columns", cid, sorted(keys))
+            else:                                                    # normal: remember what was hidden
+                keys = self._hidden_extra(cid)
+                keys.discard(key) if enabled else keys.add(key)
+                self._store_for_feed("hidden_extra_columns", cid, sorted(keys))
             self.config.save_settings()
             self._apply_column_visibility()
             return

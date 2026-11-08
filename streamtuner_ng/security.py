@@ -19,7 +19,7 @@ MAX_CACHE_FILES = 256
 # Plugin-declared extra table columns (Channel.extra_columns). Declared per channel, stored on a
 # row under "extra", and bounded here so rows stay small and safe for caches, exports and backups.
 EXTRA_TYPES = ('text', 'int', 'float', 'date')
-MAX_EXTRA_COLUMNS = 8
+MAX_EXTRA_COLUMNS = 16
 MAX_EXTRA_TEXT = 256
 RESERVED_ROW_KEYS = frozenset((
     'title', 'url', 'homepage', 'genre', 'playing', 'description', 'listeners', 'votes', 'country',
@@ -36,6 +36,23 @@ def valid_id(value: object) -> bool:
 
 def is_secret_key(value: object) -> bool:
     return isinstance(value, str) and bool(_SECRET.search(value))
+
+
+ROW_FIELD_NAMES = ('genre', 'bitrate', 'format', 'listeners', 'votes', 'country', 'description', 'playing', 'homepage')
+
+
+def valid_row_fields(value: object, problems: list | None = None) -> tuple | None:
+    """Validate a channel's `row_fields` -> the built-in table fields it supplies, or None (= offer all)."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        if problems is not None:
+            problems.append('row_fields must be a list of field names')
+        return None
+    out = [v for v in dict.fromkeys(value) if v in ROW_FIELD_NAMES]
+    if problems is not None:
+        problems.extend(f'unknown row field {str(v)[:30]!r}' for v in value if v not in ROW_FIELD_NAMES)
+    return tuple(out)
 
 
 def valid_columns(value: object, problems: list | None = None) -> list[tuple[str, str, str]]:

@@ -23,10 +23,16 @@ class IHeart(Channel):
     homepage = "https://www.iheart.com/"
     priority = "standard"
     has_search = False
+    row_fields = ('genre', 'format', 'country', 'description', 'homepage')
     icon_emoji = "❤"
     ALL = "★ All Stations"
     category_pins = (ALL,)
     all_category = ALL
+    extra_columns = [("Call letters", "call_letters"), ("Band", "band"), ("Frequency", "frequency", "float"),
+                     ("City", "city"), ("State", "state"), ("Audience", "audience", "int"),
+                     ("Station format", "station_format"), ("Owner", "owner"), ("Genres", "genres"),
+                     ("Station site", "site")]
+    extra_columns_hidden = ("audience", "station_format", "owner", "genres", "site")
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -87,6 +93,7 @@ class IHeart(Channel):
             mk = (s.get("markets") or [{}])[0] if s.get("markets") else {}
             loc = ", ".join(p for p in (mk.get("city", ""), mk.get("stateAbbreviation", "")) if p)
             tag = f"{s.get('band', '')} {s.get('callLetters', '')}".strip()
+            names = [g.get("name") for g in (s.get("genres") or []) if isinstance(g, dict) and g.get("name")]
             out.append(make_row(
                 title=s.get("name", "") or s.get("callLetters", ""),
                 url=url,
@@ -97,6 +104,10 @@ class IHeart(Channel):
                 favicon=s.get("logo", "") or "",
                 format="audio/aac",
                 listformat="url",
+                extra={"call_letters": s.get("callLetters"), "band": s.get("band"), "frequency": s.get("freq") or None,
+                       "city": mk.get("city"), "state": mk.get("stateAbbreviation"), "audience": s.get("cume"),
+                       "station_format": s.get("format"), "owner": s.get("provider"),
+                       "genres": ", ".join(names), "site": s.get("website")},
             ))
         return out
 

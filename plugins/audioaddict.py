@@ -48,6 +48,10 @@ class AudioAddict(Channel):
     has_search = True
     needs_resolve = True         # rows carry audioaddict://… ; the listen key is added only at play time
     category_sort = False        # keep the networks in their listed order, not A–Z
+    row_fields = ('genre', 'format', 'description')
+    extra_columns = [("Director", "director"), ("Top artists", "artists"), ("Added", "added", "date"),
+                     ("Updated", "updated", "date"), ("Channel key", "channel_key")]
+    extra_columns_hidden = ("added", "updated", "channel_key")
     icon_emoji = "🎚"
     options_spec = [
         {"type": "choice", "key": "audioaddict_quality", "label": "Bitrate", "default": "_hi",
@@ -77,6 +81,7 @@ class AudioAddict(Channel):
             if fav.startswith("//"):
                 fav = "https:" + fav
             fav = fav.replace("{?size}", "")
+            artists = ", ".join(a.get("name", "") for a in (c.get("artists") or [])[:5] if isinstance(a, dict) and a.get("name"))
             rows.append(make_row(
                 title=c.get("name", ""),
                 url=f"{_SCHEME}{domain}/{key}",   # tokenized — the listen key is never stored here
@@ -85,6 +90,9 @@ class AudioAddict(Channel):
                 favicon=fav,
                 format="audio/aac",
                 listformat="url",
+                extra={"director": c.get("channel_director"), "artists": artists,
+                       "added": (c.get("created_at") or "")[:10], "updated": (c.get("updated_at") or "")[:10],
+                       "channel_key": key},
             ))
         return rows
 

@@ -34,6 +34,9 @@ class Live365(Channel):
     ALL = "All Stations"
     category_pins = (TOP, ALL)
     all_category = ALL
+    row_fields = ('genre', 'bitrate', 'format', 'description', 'homepage')
+    extra_columns = [("Live365 ID", "live365_id")]
+    extra_columns_hidden = ("live365_id",)
 
     def update_categories(self) -> list[str]:
         return [self.TOP, self.ALL]
@@ -62,6 +65,7 @@ class Live365(Channel):
                 url=url,                         # a direct stream — mpv plays it as-is
                 homepage=loc,                    # the Live365 station page (Open Website / Info)
                 listformat="url",
+                extra={"live365_id": m.group(2)},
             ))
         rows.sort(key=lambda r: r["title"].lower())
         return rows
@@ -93,7 +97,9 @@ class Live365(Channel):
             url=url,
             genre=h.get("icy-genre", "") or "",
             homepage=h.get("icy-url", "") or "",
+            description=h.get("icy-description", "") or "",
             bitrate=int(br) if br.isdigit() else 0,
             format=h.get("content-type", "audio/mpeg") or "audio/mpeg",
             listformat="url",
+            extra={"live365_id": sid},
         )

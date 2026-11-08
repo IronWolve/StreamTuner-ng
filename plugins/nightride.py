@@ -28,6 +28,7 @@ class Nightride(Channel):
     priority = "standard"
     icon_emoji = "🌃"
     needs_resolve = True
+    row_fields = ('genre', 'format')
 
     def resolve_url(self, row: dict) -> dict:
         # Existing favorites and disk caches can still contain the retired AAC mounts.

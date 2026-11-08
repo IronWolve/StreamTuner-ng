@@ -20,6 +20,8 @@ class Litt(Channel):
     ALL = "★ All Stations"
     category_pins = (ALL,)
     all_category = ALL
+    row_fields = ('genre', 'format', 'description', 'homepage')
+    extra_columns = [("Curator", "curator"), ("Tags", "tags")]
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -47,10 +49,14 @@ class Litt(Channel):
             url = s.get("stream_url") or s.get("recovery_stream_url") or ""
             if not url:
                 continue
+            site = s.get("web_url") or ""
+            tags = s.get("tags")
             rows.append(make_row(
                 title=s.get("name", "") or s.get("short_name", ""),
                 url=url,
-                homepage="https://littlive.com/",
+                homepage=site if site.startswith(("http://", "https://")) else "https://littlive.com/",
+                extra={"curator": s.get("curator_name"),
+                       "tags": ", ".join(str(t) for t in tags if isinstance(t, (str, int))) if isinstance(tags, list) else tags},
                 genre=s.get("genre", "") or "Other",
                 description=s.get("description", "") or "",
                 favicon=s.get("medium_logo_url") or s.get("square_logo_url") or "",

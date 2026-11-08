@@ -48,12 +48,15 @@ class Shoutcast(Channel):
     homepage = "https://directory.shoutcast.com/"
     priority = "standard"
     has_search = True
+    row_fields = ('genre', 'bitrate', 'format', 'listeners', 'playing', 'homepage')
     TOP = "★ Top 500"
     ALL = "★ All Stations"
     category_pins = (TOP, ALL)   # Top 500 + All pinned; genres sort A–Z
     all_category = ALL           # "All Stations" = union of the sweep + every browsed genre
     listeners_category = "★ With Listeners"   # injected under All: only stations with live listeners
     default_sort = "listeners"   # open every category sorted by live listeners (most active first)
+    extra_columns = [("Shoutcast ID", "shoutcast_id", "int"), ("AAC", "aac")]
+    extra_columns_hidden = ("shoutcast_id", "aac")
     all_chunked = True           # ★ All Stations pages in by genre-chunk (count climbs as it loads)
     page_size = 600              # first-page threshold (capped 500-genres won't trigger a 2nd page)
     _GENRE_BATCH = 10            # cap requests in one provider page
@@ -103,12 +106,15 @@ class Shoutcast(Channel):
             rows.append(make_row(
                 title=s.get("Name", ""),
                 url=TUNEIN + str(sid),       # public tune-in .pls; mpv loads it directly
+                homepage=s.get("IceUrl") if str(s.get("IceUrl") or "").startswith(("http://", "https://")) else "",
                 genre=s.get("Genre", ""),
                 playing=s.get("CurrentTrack", ""),
                 listeners=s.get("Listeners") or 0,   # normalized by the host, including malformed metrics
                 bitrate=s.get("Bitrate") or 0,
                 format=s.get("Format", "audio/mpeg"),
                 listformat="pls",
+                extra={"shoutcast_id": sid,
+                       "aac": "Yes" if (s.get("IsAACEnabled") or s.get("AACEnabled")) else ""},
             ))
         return rows
 
