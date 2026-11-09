@@ -84,6 +84,9 @@ def run_app() -> int:
     win._list_message("Loading services…")
     from .worker import run_io
     from PySide6.QtCore import QTimer
+    from ..desktopentry import integrate_appimage
+    # An AppImage installs nothing by itself: give it a launcher entry and icon for this user (no-op elsewhere).
+    run_io(lambda: integrate_appimage(config, asset_path("logo.png")), lambda *_: None)
     import threading
     boot_cancel = threading.Event()
     app.aboutToQuit.connect(boot_cancel.set)

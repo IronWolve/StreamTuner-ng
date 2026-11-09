@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__, asset_path
+from . import APP_ID, APP_NAME, __version__, asset_path
 from .config import Config
 from .plugins.channels import BUILTINS, PLUGIN_ERRORS
 from .plugins.channels._selftest import BrokenGarbage, BrokenHang, BrokenThrow
@@ -106,6 +106,14 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
               all(path.parent in provider_roots for path in provider_files))
 
         _user_plugin_checks(check, config, host)
+        from .desktopentry import integrate
+        fake_image = Path(folder) / 'Selftest.AppImage'
+        fake_image.write_bytes(b'x')
+        made = integrate(str(fake_image), asset_path('logo.png'), name=APP_NAME, app_id=APP_ID, home=Path(folder) / 'share')
+        entry = Path(folder) / 'share' / 'applications' / f'{APP_ID}.desktop'
+        icon = Path(folder) / 'share' / 'icons' / 'hicolor' / '512x512' / 'apps' / f'{APP_ID}.png'
+        check('an AppImage can install its launcher entry and icon', made == 'created' and entry.is_file()
+              and f'Icon={APP_ID}' in entry.read_text() and icon.is_file() and icon.stat().st_size > 1000, made)
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
         check('local file URLs only for opted-in plugins', valid_url('file:///music/a.pls', local=True)
               and not valid_url('file:///music/a.pls') and not valid_url('file:///music/a.pls', local=True, web=True))
