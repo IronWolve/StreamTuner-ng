@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{APP_NAME} {__version__}")
         return 0
     if args.plugins:
-        from .selftest import list_plugins
+        from .plugincheck import list_plugins
         return list_plugins()
     if not args.selftest or args.gui_smoke:
         from .compat import qt_startup_error

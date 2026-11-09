@@ -152,6 +152,7 @@
 !/streamtuner_ng/plugins/loader.py
 !/streamtuner_ng/plugins/result.py
 !/streamtuner_ng/secrets.py
+!/streamtuner_ng/plugincheck.py
 !/streamtuner_ng/security.py
 !/streamtuner_ng/selftest.py
 !/streamtuner_ng/ui/__init__.py
