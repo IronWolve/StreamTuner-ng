@@ -1968,7 +1968,12 @@ class MainWindow(QMainWindow):
             self._play_row(row)
 
     def _play_row(self, row) -> None:
-        row = station_row(row)
+        if isinstance(row, dict):
+            origin = self.host.channels.get(self._resolve_source(row))
+            local = bool(getattr(origin, "local_files", False))   # a plugin that opted in may play file:// stations
+        else:
+            local = False
+        row = station_row(row, local=local)
         if row is None:
             self._status_error("Unsupported station URL")
             return

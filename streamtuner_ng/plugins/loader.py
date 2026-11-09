@@ -51,11 +51,6 @@ def plugin_directories() -> tuple[Path, ...]:
                         return adjacent, bundled
             except (OSError, RuntimeError):
                 pass
-    if getattr(sys, 'frozen', False) and sys.platform.startswith('linux') and _read_only_install(bundled):
-        # A system-wide install (a Debian package under /opt) is read-only for the user: their own
-        # providers go in the settings folder, the bundled ones are still read from the install.
-        from ..config import _base_dir
-        return _base_dir() / 'plugins', bundled
     return (bundled,)
 
 
@@ -67,7 +62,18 @@ def _read_only_install(folder: Path) -> bool:
 
 
 def user_plugin_dir(config=None) -> Path:
+    """Where the user's own providers go (and where Open Plugins Folder points).
+
+    Beside the app, unless that folder cannot be written (a system-wide install such as a Debian
+    package): then the settings folder, which is also read as the legacy profile folder, so a
+    provider dropped there is loaded once."""
     folder = plugin_directories()[0]
+    if _read_only_install(folder):
+        if config is not None:
+            folder = Path(config.dir) / 'plugins'
+        else:
+            from ..config import _base_dir
+            folder = _base_dir() / 'plugins'
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:
