@@ -7,12 +7,18 @@ shows the generic gear. When the app runs from an AppImage it therefore writes, 
 
 The entry carries a marker: one that is not ours is never touched, and ours is rewritten only when
 the AppImage moved or the icon changed. Turn it off with the setting ``desktop_integration`` = false.
+
+The file manager draws its own generic icon for an AppImage file (it does not read the icon inside),
+so the app also asks GNOME Files to show its icon on the AppImage file itself (``gio set`` of
+``metadata::custom-icon``); a custom icon the user chose is never replaced.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 MARKER = "X-StreamTuner-Managed=true"
@@ -77,9 +83,46 @@ def _icons(home: Path, source: Path, app_id: str, force: bool) -> int:
     return written
 
 
+def _system_env() -> dict:
+    """The environment without the AppImage's bundled library path, so system tools load system libraries."""
+    env = dict(os.environ)
+    if "LD_LIBRARY_PATH_ORIG" in env:
+        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    env.pop("LD_PRELOAD", None)
+    return env
+
+
+def mark_file(appimage: str, icon: Path, app_id: str) -> str:
+    """Show the app icon on the AppImage file in the file manager; returns what happened, as a short phrase."""
+    gio = shutil.which("gio")
+    if not gio:
+        return "no gio"
+    uri = icon.resolve().as_uri()
+    env = _system_env()
+    try:
+        info = subprocess.run([gio, "info", "-a", "metadata::custom-icon", appimage],
+                              capture_output=True, text=True, timeout=8, env=env)
+        current = ""
+        for line in info.stdout.splitlines():
+            if "metadata::custom-icon:" in line:
+                current = line.split("metadata::custom-icon:", 1)[1].strip()
+        if current == uri:
+            return "already set"
+        if current and not current.endswith(f"/apps/{app_id}.png"):
+            return "kept: another icon is set"
+        done = subprocess.run([gio, "set", appimage, "metadata::custom-icon", uri],
+                              capture_output=True, text=True, timeout=8, env=env)
+        return "set" if done.returncode == 0 else "failed: " + done.stderr.strip()[:80]
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"failed: {exc}"
+
+
 def integrate(appimage: str | None, icon_source: str | os.PathLike, *, name: str, app_id: str,
-              home: str | os.PathLike | None = None, enabled: bool = True) -> str:
-    """Install or refresh the launcher entry and icons; returns what happened, as a short phrase."""
+              home: str | os.PathLike | None = None, enabled: bool = True, mark: bool = False) -> str:
+    """Install or refresh the launcher entry and icons; returns what happened, as a short phrase.
+    With ``mark`` the AppImage file also gets the app icon in the file manager."""
     if not enabled:
         return "disabled"
     if not appimage or not os.path.isabs(appimage) or not os.path.isfile(appimage):
@@ -107,6 +150,8 @@ def integrate(appimage: str | None, icon_source: str | os.PathLike, *, name: str
             _write(entry, text.encode("utf-8"))
         elif icons:
             status = "updated"
+        if mark:
+            mark_file(appimage, base / "icons" / "hicolor" / "512x512" / "apps" / f"{app_id}.png", app_id)
     except OSError as exc:
         return f"failed: {exc}"
     return status
@@ -116,4 +161,4 @@ def integrate_appimage(config, icon_source: str | os.PathLike) -> str:
     """Called at start-up: does nothing unless the app is running from an AppImage and the setting allows it."""
     from . import APP_ID, APP_NAME
     return integrate(os.environ.get("APPIMAGE"), icon_source, name=APP_NAME, app_id=APP_ID,
-                     enabled=bool(config.get(SETTING, True)))
+                     enabled=bool(config.get(SETTING, True)), mark=True)

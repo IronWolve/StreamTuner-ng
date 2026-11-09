@@ -109,7 +109,7 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         from .desktopentry import integrate
         fake_image = Path(folder) / 'Selftest.AppImage'
         fake_image.write_bytes(b'x')
-        made = integrate(str(fake_image), asset_path('logo.png'), name=APP_NAME, app_id=APP_ID, home=Path(folder) / 'share')
+        made = integrate(str(fake_image), asset_path('logo.png'), name=APP_NAME, app_id=APP_ID, home=Path(folder) / 'share', mark=False)
         entry = Path(folder) / 'share' / 'applications' / f'{APP_ID}.desktop'
         icon = Path(folder) / 'share' / 'icons' / 'hicolor' / '512x512' / 'apps' / f'{APP_ID}.png'
         check('an AppImage can install its launcher entry and icon', made == 'created' and entry.is_file()
