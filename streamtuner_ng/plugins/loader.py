@@ -61,12 +61,10 @@ def _read_only_install(folder: Path) -> bool:
         return False
 
 
-def user_plugin_dir(config=None) -> Path:
-    """Where the user's own providers go (and where Open Plugins Folder points).
-
-    Beside the app, unless that folder cannot be written (a system-wide install such as a Debian
-    package): then the settings folder, which is also read as the legacy profile folder, so a
-    provider dropped there is loaded once."""
+def user_plugin_folder(config=None) -> Path:
+    """Where the user's own providers go: beside the app, unless that folder cannot be written (a
+    system-wide install such as a Debian package), then the settings folder, which is also read as the
+    legacy profile folder, so a provider dropped there is loaded once. Creates nothing."""
     folder = plugin_directories()[0]
     if _read_only_install(folder):
         if config is not None:
@@ -74,6 +72,12 @@ def user_plugin_dir(config=None) -> Path:
         else:
             from ..config import _base_dir
             folder = _base_dir() / 'plugins'
+    return folder
+
+
+def user_plugin_dir(config=None) -> Path:
+    """The folder for the user's own providers (see user_plugin_folder), created when missing."""
+    folder = user_plugin_folder(config)
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:

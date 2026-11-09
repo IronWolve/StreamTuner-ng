@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="streamtuner-ng", description=f"{APP_NAME} — internet radio browser")
     ap.add_argument("--version", action="store_true", help="print version and exit")
     ap.add_argument("--selftest", action="store_true", help="run headless self-check and exit")
+    ap.add_argument("--plugins", action="store_true", help="list the plugins that load for you and any that fail, then exit")
     ap.add_argument("--network", action="store_true", help="include live directory fetches in --selftest")
     ap.add_argument("--gui-smoke", action="store_true", help="include isolated offscreen Qt checks in --selftest")
     ap.add_argument("--engine-check", action="store_true", help="initialize the audio engine with null output in --selftest")
@@ -27,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(f"{APP_NAME} {__version__}")
         return 0
+    if args.plugins:
+        from .selftest import list_plugins
+        return list_plugins()
     if not args.selftest or args.gui_smoke:
         from .compat import qt_startup_error
         problem = qt_startup_error()
