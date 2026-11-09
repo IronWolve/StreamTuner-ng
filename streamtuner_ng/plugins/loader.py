@@ -51,7 +51,19 @@ def plugin_directories() -> tuple[Path, ...]:
                         return adjacent, bundled
             except (OSError, RuntimeError):
                 pass
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('linux') and _read_only_install(bundled):
+        # A system-wide install (a Debian package under /opt) is read-only for the user: their own
+        # providers go in the settings folder, the bundled ones are still read from the install.
+        from ..config import _base_dir
+        return _base_dir() / 'plugins', bundled
     return (bundled,)
+
+
+def _read_only_install(folder: Path) -> bool:
+    try:
+        return folder.is_dir() and not os.access(folder, os.W_OK)
+    except OSError:
+        return False
 
 
 def user_plugin_dir(config=None) -> Path:
