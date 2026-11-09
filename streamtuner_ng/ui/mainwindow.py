@@ -9,10 +9,10 @@ import time
 import threading
 from collections import OrderedDict
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QAbstractItemView, QApplication, QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QPushButton, QSlider, QSplitter,
     QToolBar, QVBoxLayout, QWidget,
 )
@@ -21,8 +21,10 @@ from .. import APP_NAME, __version__
 from ..player.mpv_player import clean_icy_title
 from ..plugins.result import Result, Status
 from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, redact_url, station_row, valid_url
+from ..songhistory import SongHistory
 from . import theme
 from .models import COLUMNS, DEFAULT_HIDDEN, DEFAULT_WIDTH, DEFAULT_WIDTHS, FILTER_ROLE, SORT_ROLE, StationModel
+from .fieldfilter import StationProxy, clean_spec, field_kind
 from .stationtable import StationTable
 from .spectrogram import Spectrogram
 from .vumeter import VuMeter
@@ -117,7 +119,8 @@ class MainWindow(QMainWindow):
         self._discord = None                  # Discord Rich Presence (created lazily when enabled)
         self._discord_pending = None          # throttle: latest queued presence (tuple, or "CLEAR")
         self._discord_last = 0.0              # monotonic time the last presence was actually sent
-        self._song_history: list[dict] = []   # session log of ICY tracks (View → Song history)
+        self._song_history = SongHistory(self.config)   # every song heard, saved with its time (View → Song history)
+        self._song_window = None
         self._playing_row_url = ""            # url of the row currently streaming
         self._pending_filter = ""
         self._search_timer = QTimer(self)     # debounce search (smooth on huge lists)
@@ -148,6 +151,10 @@ class MainWindow(QMainWindow):
         self._vu_timer = QTimer(self)            # ~30 fps level-meter poll
         self._vu_timer.timeout.connect(self._tick_viz)
         # Visual polling starts only for visible, active playback.
+        self._song_ask_gen = 0                   # F5 in Favorites: a newer ask replaces an older one
+        self._field_filters: dict[str, dict[str, dict]] = {}   # feed id -> {field: filter spec}, for this session
+        self._reload_all_job = None              # View -> Reload all, created on first use
+        self._bg_done: dict = {}                 # (cid, cat) -> callback(ok) for Reload all
         self._bg_inflight: set = set()           # (cid, cat) currently being background-refreshed
         self._refresh_timer = QTimer(self)       # periodic freshening of the viewed category
         self._refresh_timer.timeout.connect(self._periodic_refresh)
@@ -206,6 +213,7 @@ class MainWindow(QMainWindow):
         self._scope_changed()
 
     def _build_panes(self) -> None:
+        self._pane_headers = {}                           # pane widget -> its heading label (focus marker)
         self.channels = QListWidget()
         self.channels.currentItemChanged.connect(self._on_channel)
         self.channels.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -225,7 +233,7 @@ class MainWindow(QMainWindow):
         self.model.fav_provider = bm.is_favourite if bm else None
         self.model.icon_provider = self._station_icon
         self.model.source_provider = self._source_label
-        self.proxy = QSortFilterProxyModel()
+        self.proxy = StationProxy()
         self.proxy.setSourceModel(self.model)
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy.setFilterKeyColumn(0)
@@ -297,6 +305,11 @@ class MainWindow(QMainWindow):
         station_layout.addWidget(self.table)
         split.addWidget(station_pane)
         self._split = split
+        self._pane_headers.setdefault(self.table, None)   # the table marks focus with its own outline
+        for pane in self._pane_headers:
+            pane.installEventFilter(self)
+        self.setTabOrder(self.channels, self.categories)
+        self.setTabOrder(self.categories, self.table)
         split.setStretchFactor(2, 1)
         split.setSizes([160, 170, 730])
 
@@ -320,13 +333,64 @@ class MainWindow(QMainWindow):
         header.setObjectName("paneHeader")
         v.addWidget(header)
         v.addWidget(widget)
+        self._pane_headers[widget] = header
         return box
+
+    # ---- keyboard between the three panes (Services -> Categories -> Stations) ----
+    def _pane_cycle(self) -> list:
+        return [self.channels, self.categories, self.table]
+
+    def _focus_pane(self, pane) -> None:
+        pane.setFocus(Qt.TabFocusReason)
+        if pane is self.categories and self.categories.currentRow() < 0 and self.categories.count():
+            self.categories.setCurrentRow(0)                 # entering an empty selection lands on the first entry
+        elif pane is self.channels and self.channels.currentRow() < 0 and self.channels.count():
+            self.channels.setCurrentRow(0)
+        elif pane is self.table and not self.table.currentIndex().isValid() and self.proxy.rowCount():
+            self.table.setCurrentIndex(self.proxy.index(0, 0))
+
+    def _step_pane(self, delta: int) -> None:
+        panes = self._pane_cycle()
+        focus = QApplication.focusWidget()
+        here = next((i for i, p in enumerate(panes) if p is focus or p.isAncestorOf(focus)), -1) if focus else -1
+        self._focus_pane(panes[(here + delta) % len(panes)] if here >= 0 else panes[0])
+
+    def _mark_focus(self, pane, on: bool) -> None:
+        header = self._pane_headers.get(pane)
+        if header is not None:
+            header.setProperty("focused", "true" if on else "false")
+            header.style().unpolish(header)
+            header.style().polish(header)
+
+    def _pane_key(self, obj, ev) -> bool:
+        """Tab/Shift+Tab/F6 move between panes; Right or Enter goes on in the two lists, Left goes back."""
+        key = ev.key()
+        if key in (Qt.Key_Tab, Qt.Key_Backtab) and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            self._step_pane(-1 if key == Qt.Key_Backtab or ev.modifiers() & Qt.ShiftModifier else 1)
+            return True
+        if obj is self.channels or obj is self.categories:
+            nxt = self.categories if obj is self.channels else self.table
+            if key in (Qt.Key_Right, Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers():
+                self._focus_pane(nxt)
+                return True
+            if key == Qt.Key_Left and obj is self.categories and not ev.modifiers():
+                self._focus_pane(self.channels)
+                return True
+        return False
 
     # ---- album-art box (floats bottom-left of the Services pane) ----
     def eventFilter(self, obj, ev):
         from PySide6.QtCore import QEvent
         if obj is getattr(self, "_services_pane", None) and ev.type() == QEvent.Resize:
             self._position_art()
+        elif obj in getattr(self, "_pane_headers", ()):
+            kind = ev.type()
+            if kind == QEvent.KeyPress and self._pane_key(obj, ev):
+                return True
+            if kind == QEvent.FocusIn:
+                self._mark_focus(obj, True)
+            elif kind == QEvent.FocusOut:
+                self._mark_focus(obj, False)
         return super().eventFilter(obj, ev)
 
     def _position_art(self) -> None:
@@ -488,6 +552,9 @@ class MainWindow(QMainWindow):
 
         m_view = mb.addMenu("&View")
         m_view.addAction(QAction("Reload current channel", self, shortcut="F5", triggered=self._reload))
+        self._reload_all_action = QAction("Reload all", self, shortcut="Shift+F5", triggered=self._reload_all)
+        self._reload_all_action.setToolTip("Fetch every saved list of every service again, in the background")
+        m_view.addAction(self._reload_all_action)
         self._columns_menu = StickyMenu("Columns", m_view)
         m_view.addMenu(self._columns_menu)
         self._column_actions = {}
@@ -571,6 +638,8 @@ class MainWindow(QMainWindow):
         self.channels.blockSignals(False)
         if chosen is not None and not same:
             self._on_channel(self.channels.currentItem(), None)
+        if self._field_filters:
+            self._apply_field_filters()               # a rebuilt list keeps its "filtered" marks
 
     def _add_channel_separator(self) -> None:
         """A thin divider line in the Services list (separates Favorites/Local from the services)."""
@@ -1058,6 +1127,7 @@ class MainWindow(QMainWindow):
         self.model.set_rows([])
         self._sync_extra_columns()               # the table and the Columns menu follow this feed at once,
         self._rebuild_columns_menu()             # not after its first list loads
+        self._apply_field_filters()              # and so do this feed's field filters
         self.categories.clear()
         cid, generation = self.current_channel, self._channel_gen
         self._refresh_dot(cid)
@@ -1562,6 +1632,45 @@ class MainWindow(QMainWindow):
         loaded = bool(self.model.rowCount())
         return [(labels[f], f, self._column_wanted(f), (not loaded) or self.model.has_field(f)) for f in order]
 
+    # ---- per-field filters (Fields window) ----
+    def _field_filter(self, field: str) -> dict | None:
+        return (self._field_filters.get(self.current_channel) or {}).get(field)
+
+    def _any_field_filter(self) -> bool:
+        return bool(self._field_filters.get(self.current_channel))
+
+    def _set_field_filter(self, field: str, spec: dict | None) -> None:
+        cid = self.current_channel
+        if not cid:
+            return
+        spec = clean_spec(field_kind(self.model, field), spec)
+        filters = self._field_filters.setdefault(cid, {})
+        if spec:
+            filters[field] = spec
+        else:
+            filters.pop(field, None)
+        if not filters:
+            self._field_filters.pop(cid, None)
+        self._apply_field_filters()
+        if self.model.rowCount():
+            self.statusBar().showMessage(
+                f"Filters: {self.proxy.rowCount():,} of {self.model.rowCount():,} stations shown", 5000)
+
+    def _clear_field_filters(self) -> None:
+        self._field_filters.pop(self.current_channel, None)
+        self._apply_field_filters()
+
+    def _apply_field_filters(self) -> None:
+        """Give the table the filters of the feed on screen and mark filtered feeds in the sidebar."""
+        self.proxy.set_field_filters(self._field_filters.get(self.current_channel) or {})
+        for i in range(self.channels.count()):
+            item = self.channels.item(i)
+            cid = item.data(Qt.UserRole)
+            if not cid or cid not in self.host.channels:
+                continue
+            title = self.host.channels[cid].title
+            item.setText(f"{title}  · filtered" if self._field_filters.get(cid) else title)
+
     def _set_column_order(self, order: list) -> None:
         """Put the columns in this field order (the Fields window's drag and drop)."""
         model_fields = [field for _label, field in self.model.columns()]
@@ -1710,6 +1819,9 @@ class MainWindow(QMainWindow):
                        lambda: self._toggle_favourite_row(row))
         menu.addSeparator()
         menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(redact_url(row.get("url", ""))))
+        song = clean_icy_title(str(row.get("playing") or ""))
+        if song:
+            menu.addAction("Copy song", lambda: QApplication.clipboard().setText(song))     # what the station plays now
         menu.addAction("Info…", lambda: self._station_info(row))
         menu.addAction("Recache icon", lambda: self._recache_station_icon(row))
         if row.get("homepage"):
@@ -1717,7 +1829,7 @@ class MainWindow(QMainWindow):
                            lambda: self._open_website(row["homepage"]))
         menu.addSeparator()
         self._rebuild_columns_menu()
-        menu.addMenu(self._columns_menu)              # choose the fields (a tear-off lets you keep it open)
+        menu.addMenu(self._columns_menu)              # choose the fields for this feed
         try:
             menu.exec(self.table.viewport().mapToGlobal(pos))
         finally:
@@ -1726,7 +1838,9 @@ class MainWindow(QMainWindow):
     def _station_info(self, row: dict) -> None:
         from .dialogs import station_info
         labels = {field[2:]: label for label, field in self.model.columns() if field.startswith("x:")}
-        station_info(self, self.config.get("theme", "dark"), row, extra_labels=labels)
+        types = {field[2:]: self.model.column_type(field) for _label, field in self.model.columns()
+                 if field.startswith("x:")}
+        station_info(self, self.config.get("theme", "dark"), row, extra_labels=labels, extra_types=types)
 
     def _nowplaying_menu(self, pos) -> None:
         """Right-click the now-playing text on the player bar: copy the track / stream URL, station
@@ -1996,7 +2110,7 @@ class MainWindow(QMainWindow):
                 self._notify(title, (self._playing_row or {}).get("title", ""), self._playing_row)
 
     def _log_song(self, song: str) -> None:
-        """Append a played track to the session song history (View → Song history)."""
+        """Record a played track, with the time heard, in the saved song history (View → Song history)."""
         song = clean_icy_title(song or "")     # strip iHeart-style metadata blobs before storing
         if not song:
             return
@@ -2004,60 +2118,20 @@ class MainWindow(QMainWindow):
         station = row.get("title", "")
         ch = self.host.channels.get(row.get("_source") or self.current_channel)
         service = ch.title if ch else ""
-        site = f"{station} ({service})" if (station and service) else (station or service)
-        if self._song_history and self._song_history[-1]["song"] == song \
-                and self._song_history[-1]["site"] == site:
-            return                                         # de-dupe the immediately-previous entry
-        self._song_history.append({"song": song, "site": site})
-        del self._song_history[:-500]                      # keep the last 500
+        keep = {k: row[k] for k in ("title", "url", "_source") if row.get(k)}
+        entry = self._song_history.add(song, station, service, keep or None)
+        if entry is not None and self._song_window is not None:
+            self._song_window.changed()
 
     def _song_history_dialog(self) -> None:
-        import csv
-        import io
-
-        from PySide6.QtWidgets import (
-            QAbstractItemView, QApplication, QHeaderView, QPushButton, QTableWidget, QTableWidgetItem,
-        )
-
-        from .dialogs import StyledDialog
-        dlg = StyledDialog(self, "Song History", self.config.get("theme", "dark"))
-        dlg.card.setMinimumWidth(640)
-        table = QTableWidget()
-        table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["Song", "Site"])
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.verticalHeader().setVisible(False)
-        table.setMinimumSize(600, 380)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-
-        def render() -> None:
-            hist = list(reversed(self._song_history))    # newest first
-            table.setRowCount(len(hist))
-            for i, e in enumerate(hist):
-                table.setItem(i, 0, QTableWidgetItem(clean_icy_title(e.get("song", ""))))
-                table.setItem(i, 1, QTableWidgetItem(e.get("site", "")))
-
-        def copy_csv() -> None:
-            buf = io.StringIO()
-            wr = csv.writer(buf)
-            wr.writerow(["Song", "Site"])
-            for e in reversed(self._song_history):
-                wr.writerow([clean_icy_title(e.get("song", "")), e.get("site", "")])
-            QApplication.clipboard().setText(buf.getvalue())
-
-        render()
-        dlg.body.addWidget(table)
-        copy = QPushButton("Copy")
-        copy.setToolTip("Copy the table as CSV")
-        copy.clicked.connect(copy_csv)
-        clear = QPushButton("Clear")
-        clear.clicked.connect(lambda: (self._song_history.clear(), render()))
-        close = QPushButton("Close")
-        close.clicked.connect(dlg.accept)
-        dlg.add_buttons(copy, clear, close)
-        dlg.exec()
+        """Open the Song History window (one of a kind: an open one is brought forward)."""
+        from .songwindow import SongHistoryWindow
+        window = self._song_window
+        if window is None:
+            window = self._song_window = SongHistoryWindow(self, self._song_history)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def _elide_np(self) -> None:
         fm = QFontMetrics(self.np_label.font())
@@ -2241,6 +2315,8 @@ class MainWindow(QMainWindow):
         cid = self.current_channel
         if not cid:
             return
+        if cid == "bookmarks" and self.config.get("reload_favorites_song", True):
+            QTimer.singleShot(400, self._ask_favorite_songs)        # after the list has been rebuilt
         if self.host.health[cid].auto_disabled:
             self.host.set_enabled(cid, True)
         selected = preferred or self.current_category
@@ -2257,6 +2333,54 @@ class MainWindow(QMainWindow):
         self._fetch_categories(cid, self._channel_gen, selected, fresh=True)
 
 
+    SONG_ASK_LIMIT = 100
+    SONG_ASK_PARALLEL = 4
+
+    def _ask_favorite_songs(self) -> None:
+        """F5 in Favorites/History: ask the first 100 listed stations' streams which song they announce now
+        (each address once, four at a time, low priority) and show the answers in the Playing column."""
+        from ..songnow import current_song
+        if self._closing or self.current_channel != "bookmarks":
+            return
+        urls, seen = [], set()
+        for r in range(self.model.rowCount()):
+            row = self.model.row_at(r)
+            if row and row["url"] not in seen:
+                seen.add(row["url"])
+                urls.append(row["url"])
+            if len(urls) >= self.SONG_ASK_LIMIT:
+                break
+        self._song_ask_gen += 1
+        gen, pending, state = self._song_ask_gen, list(reversed(urls)), {"active": 0, "asked": 0, "answers": 0}
+        total = len(urls)
+        if not total:
+            return
+        found = dict(self.model.live_songs)
+
+        def pump() -> None:
+            while pending and state["active"] < self.SONG_ASK_PARALLEL:
+                url = pending.pop()
+                state["active"] += 1
+                run_async(lambda u=url: current_song(u), lambda song, u=url: landed(u, song), priority=20)
+
+        def landed(url, song) -> None:
+            state["active"] -= 1
+            state["asked"] += 1
+            if self._closing or gen != self._song_ask_gen:
+                return
+            if isinstance(song, str) and song:
+                state["answers"] += 1
+                found[url] = song
+                self.model.set_live_songs(found)
+            if pending or state["active"]:
+                self.statusBar().showMessage(f"Playing songs: asked {state['asked']} of {total} stations…")
+                pump()
+            else:
+                self.statusBar().showMessage(
+                    f"Playing songs: {state['answers']} of {total} favorites announce a song now", 10000)
+        self.statusBar().showMessage(f"Playing songs: asking {total} stations…")
+        pump()
+
     def _refresh_channel_cache(self, cid) -> None:
         if self.current_channel == cid:
             self._reload()
@@ -2271,12 +2395,17 @@ class MainWindow(QMainWindow):
         self._cache_label.setToolTip(f"{len(self._cache)} cached lists; {self._cache.row_count:,} rows")
 
 
-    def _bg_refresh(self, cid, cat) -> None:
-        if self._closing or cid in self.INTERNAL_CHANNELS or not cat:
-            return
+    def _bg_refresh(self, cid, cat, done=None) -> None:
+        """Fetch one list again in the background and save it. `done(ok)` is called once, with whether
+        the saved copy was replaced (Reload all counts these)."""
         key = (cid, cat)
-        if key in self._bg_inflight or key == self._loading_key:
+        if self._closing or cid in self.INTERNAL_CHANNELS or not cat or key in self._bg_inflight \
+                or key == self._loading_key:
+            if done is not None:
+                done(False)
             return
+        if done is not None:
+            self._bg_done[key] = done
         self._bg_inflight.add(key)
         epoch, generation = self._cache_epoch.get(cid, 0), self._cache_generation
         cancel = self._cache_event(cid)
@@ -2313,16 +2442,23 @@ class MainWindow(QMainWindow):
 
     def _apply_bg_refresh(self, key, res, epoch=None, generation=None) -> None:
         self._bg_inflight.discard(key)
+        done = self._bg_done.pop(key, None)
         cid, cat = key
         if (self._closing or epoch is not None and epoch != self._cache_epoch.get(cid, 0)
                 or generation is not None and generation != self._cache_generation):
+            if done is not None:
+                done(False)
             return
         if not (getattr(res, "ok", False) and getattr(res, "complete", True)
                 and not getattr(res, "errors", ())):
             if (self.current_channel, self.current_category) == key:
                 self._list_message("Showing saved stations — refresh incomplete; use Retry")
                 self._retry_button.show()
+            if done is not None:
+                done(False)
             return
+        if done is not None:
+            done(True)
         rows = res.data or []
         self._cache[key] = rows
         self._save_catalog(cid, cat, rows)
@@ -2361,6 +2497,8 @@ class MainWindow(QMainWindow):
         sc("Ctrl+Up", lambda: self._nudge_volume(5))           # reliable in-app vol (Volume keys can be OS-grabbed)
         sc("Ctrl+Down", lambda: self._nudge_volume(-5))
         sc("Ctrl+R", self._reload)
+        sc("F6", lambda: self._step_pane(1))                 # Services -> Categories -> Stations
+        sc("Shift+F6", lambda: self._step_pane(-1))
         sc("Ctrl+F", self._focus_search)
         sc("Ctrl+D", self._toggle_favourite)                 # add/remove the selected station
         esc = QShortcut(QKeySequence(Qt.Key_Escape), self.search)   # Esc clears the focused search box
@@ -3041,7 +3179,16 @@ class MainWindow(QMainWindow):
             self._cancel_button.hide()
             self._retry_button.hide()
 
+    def _reload_all(self, *_a) -> None:
+        """View -> Reload all (Shift+F5): the open list, then every saved list of every enabled feed."""
+        from .reloadall import ReloadAll
+        if self._reload_all_job is None:
+            self._reload_all_job = ReloadAll(self)
+        self._reload_all_job.start()
+
     def _cancel_load(self, *_):
+        if self._reload_all_job is not None and self._reload_all_job.running:
+            self._reload_all_job.cancel()
         self._load_cancel.set()
         self._load_gen += 1
         self._channel_gen += 1
@@ -3235,6 +3382,7 @@ class MainWindow(QMainWindow):
             self.hide()
             return
         if not self._close_waiting:
+            self._song_history.save()                     # again on quit, so nothing heard is lost
             self._save_layout()
             if hasattr(self.config, "retry_failed_writes"):
                 self.config.retry_failed_writes()

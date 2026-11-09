@@ -299,6 +299,8 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QComboBox QAbstractItemView {{ border: 1px solid rgb(120,120,120); background: {panel}; }}
     QStatusBar {{ background: {panel}; color: {text}; }}
     QLabel#paneHeader {{ background: {panel2}; color: {text}; padding: 5px 8px; font-weight: bold; }}
+    QLabel#paneHeader[focused="true"] {{ border-bottom: 2px solid {green}; padding-bottom: 3px; }}
+    QTableView:focus {{ border: 1px solid {green}; }}
     QToolBar {{ background: {panel2}; border: none; spacing: 6px; padding: 5px; }}
     QWidget#playerBar {{ background: {panel2}; }}
     QLabel#artBox {{ background: {panel}; border: 1px solid rgb(120,120,120); border-radius: 6px; }}

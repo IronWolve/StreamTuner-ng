@@ -5,6 +5,7 @@ big lists (Qt's strength; DECISIONS D2). Sorting/filtering via a proxy in the vi
 from __future__ import annotations
 
 from ..security import redact_url, station_rows
+from ..timefmt import local_stamp
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
@@ -48,6 +49,7 @@ class StationModel(QAbstractTableModel):
         self._populated = set()
         self._extra: list[tuple[str, str, str]] = []     # declared (label, key, type) of the viewed channel
         self._cols = list(COLUMNS)                       # built-in columns + "x:<key>" extras
+        self.live_songs: dict[str, str] = {}
         self._types: dict[str, str] = {}                 # "x:<key>" -> text|int|float|date
         self.icon_provider = None    # callable(row) -> QIcon | None  (station favicon)
         self.fav_provider = None     # callable(url) -> bool          (is favourited)
@@ -88,12 +90,30 @@ class StationModel(QAbstractTableModel):
         return True
 
     def _mark_populated(self, row):
+        if self.live_songs and row.get("url") in self.live_songs:
+            self._populated.add("playing")
         self._populated.update(key for _label, key in COLUMNS if row.get(key) not in (None, "", 0))
         extra = row.get("extra")
         if extra and self._types:
             self._populated.update("x:" + k for k in extra if "x:" + k in self._types and extra[k] not in ("", 0))
 
+    def filter_value(self, row, field):
+        """The raw value a per-field filter compares (the favourite star and thousands commas never count)."""
+        return self._value(row, field)
+
+    def set_live_songs(self, songs: dict) -> None:
+        """Songs stations announce right now (asked from their streams); shown in the Playing column while
+        the app runs and never saved with the rows."""
+        self.live_songs = dict(list(songs.items())[-2000:])
+        if self.live_songs:
+            self._populated.add("playing")
+        if self._rows:
+            col = next(i for i, (_lbl, key) in enumerate(COLUMNS) if key == "playing")
+            self.dataChanged.emit(self.index(0, col), self.index(len(self._rows) - 1, col), [Qt.DisplayRole])
+
     def _value(self, row, key):
+        if key == "playing" and self.live_songs:
+            return self.live_songs.get(row.get("url", "")) or row.get("playing", "")
         if key.startswith("x:"):
             extra = row.get("extra")
             return extra.get(key[2:], "") if isinstance(extra, dict) else ""
@@ -110,6 +130,8 @@ class StationModel(QAbstractTableModel):
                 return f"{val:,}" if isinstance(val, int) and not isinstance(val, bool) else str(val)
             if kind == "float":
                 return f"{val:g}" if isinstance(val, (int, float)) else str(val)
+            if kind == "date":
+                return local_stamp(val)              # stored as UTC text; drawn in the computer's own time
             return str(val)
         if key in ("url", "homepage"):
             return redact_url(val)

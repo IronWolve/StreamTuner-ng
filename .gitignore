@@ -132,6 +132,9 @@
 !/streamtuner_ng/assets/wallpapers/vaporwave-1.jpg
 !/streamtuner_ng/assets/wallpapers/vaporwave-2.jpg
 !/streamtuner_ng/config.py
+!/streamtuner_ng/songhistory.py
+!/streamtuner_ng/songnow.py
+!/streamtuner_ng/timefmt.py
 !/streamtuner_ng/discord_presence.py
 !/streamtuner_ng/favicons.py
 !/streamtuner_ng/net/__init__.py
@@ -159,6 +162,10 @@
 !/streamtuner_ng/ui/models.py
 !/streamtuner_ng/ui/stationtable.py
 !/streamtuner_ng/ui/columnspanel.py
+!/streamtuner_ng/ui/fieldfilter.py
+!/streamtuner_ng/ui/reloadall.py
+!/streamtuner_ng/ui/songwindow.py
+!/streamtuner_ng/ui/windowstate.py
 !/streamtuner_ng/ui/options.py
 !/streamtuner_ng/ui/spectrogram.py
 !/streamtuner_ng/ui/theme.py

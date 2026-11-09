@@ -147,6 +147,19 @@ class OptionsDialog(StyledDialog):
         v.addWidget(nhint)
 
         v.addSpacing(8)
+        v.addWidget(QLabel("<b>Favorites</b>"))
+        songs = QCheckBox("F5 in Favorites also gets each station's playing song")
+        songs.setChecked(bool(self.config.get("reload_favorites_song", True)) if self.config else True)
+        songs.toggled.connect(self._toggle_favorites_song)
+        v.addWidget(songs)
+        shint = QLabel("Reload in Favorites or History asks each listed station's stream (the first 100, four at a "
+                       "time) which song it is announcing now and shows it in the Playing column. "
+                       "Only streams that announce song titles can answer.")
+        shint.setStyleSheet(f"color: {self.muted};")
+        shint.setWordWrap(True)
+        v.addWidget(shint)
+
+        v.addSpacing(8)
         v.addWidget(QLabel("<b>Discord</b>"))
         disc = QCheckBox("Discord rich presence (show what you're listening to on your profile)")
         disc.setChecked(bool(self.config.get("discord_rpc", False)) if self.config else False)
@@ -199,6 +212,12 @@ class OptionsDialog(StyledDialog):
     def _toggle_notifications(self, on: bool) -> None:
         if self.config is not None:
             self.config.set("notifications", on)
+            self.config.save_settings()
+        self.settings_changed.emit()
+
+    def _toggle_favorites_song(self, on: bool) -> None:
+        if self.config is not None:
+            self.config.set("reload_favorites_song", on)
             self.config.save_settings()
         self.settings_changed.emit()
 

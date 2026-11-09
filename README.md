@@ -73,7 +73,9 @@ Playback, browsing, and customization features include:
 - **Python plugins**: Drop a `.py` provider into the adjacent `plugins/` folder and restart. For AppImages, this folder sits beside the AppImage; no extraction is needed. Open it through **Tools → Open Plugins Folder**, then start with `_example.py` and the [plugin guide](PLUGINS.md). Plugins can declare their own right-click options without additional UI code.
 - **Visualizers**: Choose a stereo VU meter or a scrolling visualization driven by audio levels in the player bar.
 - **Desktop integration**: Use the tray and notifications where your desktop supports them. Optional Discord Rich Presence is off by default. Loudness normalization and keyboard shortcuts are included; global media keys are supported on Windows.
-- **Cached browsing**: Disk caching speeds up repeat visits, while background refreshes update station lists. Use **Reload** or **F5** to request fresh results.
+- **Cached browsing**: Disk caching speeds up repeat visits, while background refreshes update station lists. Use **Reload** or **F5** to request fresh results. **View → Reload all** (Shift+F5) fetches every saved list of every enabled service again in the background, two at a time, with progress and a Cancel button. In Favorites, F5 also asks each station's stream which song it is announcing now (switch this off under Options → General).
+- **Song History**: View → Song history keeps every song a station announces, with the time it was heard, until you clear it. It has a filter box, day groups, Enter or a double-click to play the station again, copy, CSV export and a two-click Clear.
+- **Fields and filters**: Each service has its own fields, widths and order. The Fields window can also filter by a field: text contains or picked values, number from–to, or a date since. Tab, Shift+Tab and F6 move between Services, Categories and Stations; dates are shown in your computer's time zone.
 
 ## Make it yours
 

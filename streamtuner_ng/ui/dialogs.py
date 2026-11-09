@@ -8,12 +8,13 @@ from __future__ import annotations
 from html import escape
 
 from ..security import redact_url, valid_url
+from ..timefmt import local_stamp
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSizeGrip, QVBoxLayout, QWidget,
 )
 
 BORDER = "rgb(120,120,120)"   # the standard grey border for boxes
@@ -58,6 +59,22 @@ class StyledDialog(QDialog):
             t.setStyleSheet(f"font-size:16px; color:{self.text_col};")
             self.body.addWidget(t)
         self._drag = None
+        self._title = title
+        self._grip = QSizeGrip(self)                       # drag the corner to resize; the size is remembered
+        self._grip.setFixedSize(18, 18)
+        self._grip.raise_()
+
+    def _bounds_name(self) -> str:
+        """Which kind of dialog this is, for remembering its size and place."""
+        import re
+        name = re.sub(r"[^a-z0-9]+", "_", (self._title or type(self).__name__).lower()).strip("_")
+        return f"dialog_{name[:40] or 'dialog'}"
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "_grip", None) is not None:
+            self._grip.move(self.width() - self._grip.width() - 26, self.height() - self._grip.height() - 26)
+            self._grip.raise_()
 
     def add_buttons(self, *buttons: QPushButton) -> None:
         row = QHBoxLayout()
@@ -67,6 +84,10 @@ class StyledDialog(QDialog):
         self.body.addLayout(row)
 
     def exec(self) -> int:
+        from .windowstate import remember_bounds
+        config = getattr(self.parent(), "config", None)
+        if config is not None:
+            remember_bounds(self, config, self._bounds_name())   # opens where it was left, at the size it was left
         try:
             return super().exec()
         finally:
@@ -261,7 +282,8 @@ def confirm(parent, mode: str, title: str, text: str) -> bool:
     return bool(dlg.exec())
 
 
-def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None) -> None:
+def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None,
+                 extra_types: dict | None = None) -> None:
     """Styled per-station info card: Name / Genre / Bitrate·Codec / Country / URL, one
     per line (selectable), with a Copy URL button."""
     dlg = StyledDialog(parent, row.get("title", "Station"), mode)
@@ -289,6 +311,8 @@ def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None)
     ]
     for key, value in (row.get("extra") or {}).items():           # columns added by the service
         label = (extra_labels or {}).get(key) or str(key).replace("_", " ").title()
+        if (extra_types or {}).get(key) == "date":
+            value = local_stamp(value)                     # kept as UTC underneath, shown in the computer's time
         fields.insert(len(fields) - 2, (label, value))
     grid = QGridLayout()
     grid.setHorizontalSpacing(14)

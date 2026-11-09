@@ -487,6 +487,26 @@ class Config:
             pass
         return files
 
+    def cache_index(self) -> list[tuple[str, str, float]]:
+        """[(feed id, list name, age in seconds)] of every saved list, read from each file's header only
+        (the rows are never loaded). The category list of a feed is reported as ``__categories__``."""
+        found = []
+        now = time.time()
+        for path in self._cache_files():
+            try:
+                with path.open("rb") as f:
+                    head = f.read(4096).decode("utf-8", "ignore")
+                cut = head.find('"rows"')
+                if cut < 0:
+                    continue
+                meta = json.loads(head[:cut].rstrip().rstrip(",") + "}")
+                cid, cat = meta.get("cid"), meta.get("cat")
+                if isinstance(cid, str) and isinstance(cat, str) and valid_id(cid) and cid == path.stem.rpartition("__")[0]:
+                    found.append((cid, cat, max(0.0, now - float(meta.get("ts", 0)))))
+            except (OSError, ValueError, TypeError):
+                continue
+        return found
+
     def _trim_cache_disk(self, protect: Path | None = None) -> None:
         """Bound only files matching this app's generated channel-cache names."""
         files = self._cache_files()
