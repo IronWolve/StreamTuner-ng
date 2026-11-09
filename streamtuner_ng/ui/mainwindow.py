@@ -25,6 +25,7 @@ from ..songhistory import SongHistory
 from . import theme
 from .models import COLUMNS, DEFAULT_HIDDEN, DEFAULT_WIDTH, DEFAULT_WIDTHS, FILTER_ROLE, SORT_ROLE, StationModel
 from .fieldfilter import StationProxy, clean_spec, field_kind
+from .navhistory import NavHistory, SideButtons
 from .stationtable import StationTable
 from .spectrogram import Spectrogram
 from .vumeter import VuMeter
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self.config, self.host, self.player = config, host, player
         self.current_channel = ""
         self.current_category = ""
+        self._nav = NavHistory()      # lists opened, for Back / Forward (mouse side buttons, Alt+Left/Right)
         self._np_full = ""
         self._np_meta = ""            # bitrate/codec suffix shown right after the title
         self._play_gen = 0
@@ -175,6 +177,7 @@ class MainWindow(QMainWindow):
             self._stream_label.setToolTip(why)        # hover the ⚠ for the full reason
         self.player.set_normalize(self._normalize)   # apply the saved loudness-normalization setting
         self._setup_shortcuts()
+        self._side_buttons = SideButtons(self, self._nav_go)   # mouse Back / Forward buttons
         self._setup_media_keys()
         self._apply_appearance(self.config.get("theme", "dark"))   # apply wallpaper (if any) over the base theme
 
@@ -401,6 +404,40 @@ class MainWindow(QMainWindow):
                 self._mark_focus(obj, False)
         return super().eventFilter(obj, ev)
 
+    # ---- back / forward through the lists opened ----
+    def _nav_update(self) -> None:
+        back, forward = getattr(self, "_back_action", None), getattr(self, "_forward_action", None)
+        if back is not None and forward is not None:
+            back.setEnabled(self._view_search or self._nav.can_back())
+            forward.setEnabled(self._nav.can_forward())
+
+    def _nav_exists(self, key) -> bool:
+        return any(self.channels.item(i).data(Qt.UserRole) == key[0] for i in range(self.channels.count()))
+
+    def _nav_go(self, delta: int) -> None:
+        """Back (-1) or Forward (+1) to the list opened before or after this one. Back first leaves a
+        search-results view, which is itself a step away from the list."""
+        if delta < 0 and self._view_search:
+            self._back_to_category()
+            return
+        key = self._nav.step(delta, self._nav_exists)
+        if key is None:
+            self.statusBar().showMessage("No earlier list" if delta < 0 else "No later list", 1500)
+            return
+        cid, cat = key
+        if cid == self.current_channel:
+            items = self.categories.findItems(cat, Qt.MatchExactly)
+            if not items:
+                self._nav.forget(key)
+                self.statusBar().showMessage(f"{cat} is no longer in this service", 2500)
+            else:
+                self.categories.setCurrentItem(items[0])
+        else:
+            item = next(self.channels.item(i) for i in range(self.channels.count())
+                        if self.channels.item(i).data(Qt.UserRole) == cid)
+            self.channels.setCurrentItem(item)
+        self._nav_update()
+
     def _position_art(self) -> None:
         pm = self.art.pixmap()
         if self.art.isHidden() or pm.isNull():
@@ -559,6 +596,14 @@ class MainWindow(QMainWindow):
         m_file.addAction(QAction("Quit", self, shortcut="Ctrl+Q", triggered=self._quit))
 
         m_view = mb.addMenu("&View")
+        self._back_action = QAction("Back", self, shortcut="Alt+Left", triggered=lambda: self._nav_go(-1))
+        self._forward_action = QAction("Forward", self, shortcut="Alt+Right", triggered=lambda: self._nav_go(1))
+        for a, tip in ((self._back_action, "The list you looked at before (mouse Back button)"),
+                       (self._forward_action, "Go on to the list you came back from (mouse Forward button)")):
+            a.setToolTip(tip)
+            a.setEnabled(False)
+            m_view.addAction(a)
+        m_view.addSeparator()
         m_view.addAction(QAction("Reload current channel", self, shortcut="F5", triggered=self._reload))
         self._reload_all_action = QAction("Reload all", self, shortcut="Shift+F5", triggered=self._reload_all)
         self._reload_all_action.setToolTip("Fetch every saved list of every service again, in the background")
@@ -1129,6 +1174,8 @@ class MainWindow(QMainWindow):
         self._loading_key = None
         self.current_channel = cur.data(Qt.UserRole)
         self.current_category = ""
+        if self._nav.target and self._nav.target[0] != self.current_channel:
+            self._nav.target = None
         self._view_search = False
         self._search_query = None
         self.search.clear()
@@ -1215,6 +1262,8 @@ class MainWindow(QMainWindow):
                          preserve_view=False) -> None:
         ch = self.host.channels.get(cid)
         cats = list(cats)
+        if preferred is None and self._nav.target and self._nav.target[0] == cid:
+            preferred = self._nav.target[1]           # going back or forward to a list of this feed
         if getattr(ch, "category_sort", True):
             pins = [c for c in getattr(ch, "category_pins", ()) if c in cats]
             cats = pins + sorted((c for c in cats if c not in pins), key=str.lower)
@@ -1242,6 +1291,8 @@ class MainWindow(QMainWindow):
         self._search_query = None
         self.search.clear()
         self.current_category = cur.text()
+        self._nav.visit(self.current_channel, self.current_category)
+        self._nav_update()
         self._apply_default_sort()
         cid, cat = self.current_channel, self.current_category
         self._load_gen += 1
@@ -2724,6 +2775,7 @@ class MainWindow(QMainWindow):
         self._reset_load()
         self._load_gen += 1
         self._view_search = True
+        self._nav_update()
         self._search_query = query
         self._back_button.show()
         self._search_timer.stop()
@@ -2743,6 +2795,7 @@ class MainWindow(QMainWindow):
         self._reset_load()
         self._load_gen += 1
         self._view_search = True
+        self._nav_update()
         self._search_query = query
         self._search_timer.stop()
         self.proxy.setFilterFixedString("")

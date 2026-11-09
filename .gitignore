@@ -164,6 +164,7 @@
 !/streamtuner_ng/ui/stationtable.py
 !/streamtuner_ng/ui/columnspanel.py
 !/streamtuner_ng/ui/fieldfilter.py
+!/streamtuner_ng/ui/navhistory.py
 !/streamtuner_ng/ui/reloadall.py
 !/streamtuner_ng/ui/songwindow.py
 !/streamtuner_ng/ui/windowstate.py
