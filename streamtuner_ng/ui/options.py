@@ -215,6 +215,12 @@ class OptionsDialog(StyledDialog):
             self.config.save_settings()
         self.settings_changed.emit()
 
+    def _on_preroll(self, secs: int) -> None:
+        if self.config is not None:
+            self.config.set("stream_preroll_secs", int(secs))
+            self.config.save_settings()
+        self.settings_changed.emit()
+
     def _toggle_favorites_song(self, on: bool) -> None:
         if self.config is not None:
             self.config.set("reload_favorites_song", on)
@@ -318,6 +324,23 @@ class OptionsDialog(StyledDialog):
         self._usage_lbl.setText("Calculating disk usage…")
         v.addWidget(self._usage_lbl)
         self._refresh_usage()
+
+        v.addSpacing(10)
+        v.addWidget(QLabel("<b>Stream buffer</b>"))
+        self._preroll = QSpinBox()
+        self._preroll.setRange(0, 30)
+        self._preroll.setSuffix(" s")
+        self._preroll.setSpecialValueText("0 s  (start at once)")
+        self._preroll.setValue(int(self.config.get("stream_preroll_secs", 0) or 0) if self.config else 0)
+        self._preroll.setToolTip("Seconds of a station to collect before the sound starts")
+        self._preroll.valueChanged.connect(self._on_preroll)
+        hbuf = QHBoxLayout(); hbuf.addWidget(self._preroll); hbuf.addStretch(1); v.addLayout(hbuf)
+        bh = QLabel("Optional cushion against skipping: with <b>0</b> a station starts at once; with a number the "
+                    "sound starts after that many seconds of the station are collected (a station then takes that "
+                    "much longer to start). After a dropout the player always collects about 3 seconds before it "
+                    "resumes. Applies to the next station you play.")
+        bh.setWordWrap(True); bh.setStyleSheet(f"color:{self.muted};")
+        v.addWidget(bh)
 
         v.addSpacing(10)
         v.addWidget(QLabel("<b>Station icons</b>"))

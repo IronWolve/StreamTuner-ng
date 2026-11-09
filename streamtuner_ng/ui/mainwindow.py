@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__
 from ..player.mpv_player import clean_icy_title
 from ..plugins.result import Result, Status
-from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, redact_url, station_row, valid_url
+from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, copy_url, redact_url, station_row, valid_url
 from ..songhistory import SongHistory
 from . import theme
 from .models import COLUMNS, DEFAULT_HIDDEN, DEFAULT_WIDTH, DEFAULT_WIDTHS, FILTER_ROLE, SORT_ROLE, StationModel
@@ -206,6 +206,14 @@ class MainWindow(QMainWindow):
         self.search_scope = QComboBox()
         self.search_scope.addItems(["Loaded list", "This source", "All sources"])
         self.search_scope.currentIndexChanged.connect(self._scope_changed)
+        self.search_scope.setToolTip(
+            "Where to search:\n"
+            "Loaded list — filter the stations shown\n"
+            "This source — the feed's own search\n"
+            "All sources — every feed that can search (Ctrl+Shift+F)")
+        for index, tip in enumerate(("Filter the stations shown", "Search this feed with its own search",
+                                     "Search every feed that can search")):
+            self.search_scope.setItemData(index, tip, Qt.ToolTipRole)
         tb.addWidget(self.search_scope)
         self.search_submit = QPushButton("Search")
         self.search_submit.clicked.connect(self._search_enter)
@@ -1818,10 +1826,11 @@ class MainWindow(QMainWindow):
         menu.addAction("Remove favorite" if fav else "★ Favorite",
                        lambda: self._toggle_favourite_row(row))
         menu.addSeparator()
-        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(redact_url(row.get("url", ""))))
+        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
         song = clean_icy_title(str(row.get("playing") or ""))
         if song:
             menu.addAction("Copy song", lambda: QApplication.clipboard().setText(song))     # what the station plays now
+        self._add_web_search(menu, row)
         menu.addAction("Info…", lambda: self._station_info(row))
         menu.addAction("Recache icon", lambda: self._recache_station_icon(row))
         if row.get("homepage"):
@@ -1834,6 +1843,16 @@ class MainWindow(QMainWindow):
             menu.exec(self.table.viewport().mapToGlobal(pos))
         finally:
             menu.deleteLater()
+
+    def _add_web_search(self, menu, row: dict, song: str | None = None) -> None:
+        """'Search the web for this song' (when a song is known, first) and '... this station' (always)."""
+        from ..websearch import open_search, song_of, station_of
+        song = song_of(row) if song is None else song
+        name = station_of(row)
+        if song:
+            menu.addAction("Search the web for this song", lambda: open_search(song))
+        if name:
+            menu.addAction("Search the web for this station", lambda: open_search(name))
 
     def _station_info(self, row: dict) -> None:
         from .dialogs import station_info
@@ -1853,7 +1872,8 @@ class MainWindow(QMainWindow):
         track = clean_icy_title(self._np_full or "")
         if track:
             menu.addAction("Copy playing track", lambda: QApplication.clipboard().setText(track))
-        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(redact_url(row.get("url", ""))))
+        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
+        self._add_web_search(menu, row, song=track)
         menu.addSeparator()
         menu.addAction("Info…", lambda: self._station_info(row))
         if row.get("homepage"):
@@ -1954,6 +1974,7 @@ class MainWindow(QMainWindow):
         if not valid_url(url, local=local):
             self._status_error("This station did not resolve to a supported network stream")
             return
+        self.player.preroll_secs = int(self.config.get("stream_preroll_secs", 0) or 0)
         if not (self.player.play(url, local=True) if local else self.player.play(url)):
             self._status_error(self.config.redact(self.player.error or "Audio playback is unavailable"))
             self.btn_play.setChecked(bool(self.player.is_playing))
@@ -2334,11 +2355,19 @@ class MainWindow(QMainWindow):
 
 
     SONG_ASK_LIMIT = 100
-    SONG_ASK_PARALLEL = 4
+    SONG_ASK_PARALLEL = 3
+
+    def _music_playing(self) -> bool:
+        """Is a station playing right now? Background work then goes one step at a time."""
+        try:
+            return bool(self._playing_row) and bool(self.player.is_playing)
+        except Exception:  # noqa: BLE001
+            return False
 
     def _ask_favorite_songs(self) -> None:
         """F5 in Favorites/History: ask the first 100 listed stations' streams which song they announce now
-        (each address once, four at a time, low priority) and show the answers in the Playing column."""
+        (each address once, three at a time — two while music plays — at low priority) and show the answers in the Playing column."""
+        from ..net.http import run_low
         from ..songnow import current_song
         if self._closing or self.current_channel != "bookmarks":
             return
@@ -2358,10 +2387,10 @@ class MainWindow(QMainWindow):
         found = dict(self.model.live_songs)
 
         def pump() -> None:
-            while pending and state["active"] < self.SONG_ASK_PARALLEL:
+            while pending and state["active"] < (2 if self._music_playing() else self.SONG_ASK_PARALLEL):
                 url = pending.pop()
                 state["active"] += 1
-                run_async(lambda u=url: current_song(u), lambda song, u=url: landed(u, song), priority=20)
+                run_async(lambda u=url: run_low(current_song, u), lambda song, u=url: landed(u, song), priority=20)
 
         def landed(url, song) -> None:
             state["active"] -= 1
@@ -2411,7 +2440,7 @@ class MainWindow(QMainWindow):
         cancel = self._cache_event(cid)
         ch = self.host.channels[cid]
         def refresh():
-            categories = self.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel)
+            categories = self.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel, background=True)
             if not categories.ok:
                 return categories
             rows, seen, errors = [], set(), []
@@ -2419,7 +2448,7 @@ class MainWindow(QMainWindow):
             while not cancel.is_set():
                 limit = getattr(ch, "page_size", None) if offset == 0 else getattr(ch, "page_batch_size", None)
                 result = self.host.call(cid, "update_streams_page", cat, offset, limit or self.ALL_LIMIT, None,
-                                        timeout=45, cancel_event=cancel)
+                                        timeout=45, cancel_event=cancel, background=True)
                 if not result.ok:
                     return result
                 complete &= getattr(result, "complete", True)
@@ -2500,6 +2529,7 @@ class MainWindow(QMainWindow):
         sc("F6", lambda: self._step_pane(1))                 # Services -> Categories -> Stations
         sc("Shift+F6", lambda: self._step_pane(-1))
         sc("Ctrl+F", self._focus_search)
+        sc("Ctrl+Shift+F", self._focus_search_all)         # search every source, keeping the typed text
         sc("Ctrl+D", self._toggle_favourite)                 # add/remove the selected station
         esc = QShortcut(QKeySequence(Qt.Key_Escape), self.search)   # Esc clears the focused search box
         esc.activated.connect(self.search.clear)
@@ -3064,6 +3094,11 @@ class MainWindow(QMainWindow):
         if cid == "local":
             return "Add a station with File → New Local Station"
         return "No stations returned — try another category or Retry"
+
+    def _focus_search_all(self) -> None:
+        """Ctrl+Shift+F: search every source; the text already typed is kept."""
+        self.search_scope.setCurrentIndex(2)
+        self.search.setFocus()
 
     def _scope_changed(self, *_):
         scope = self.search_scope.currentIndex()

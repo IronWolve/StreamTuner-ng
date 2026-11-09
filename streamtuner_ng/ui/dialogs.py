@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from html import escape
 
-from ..security import redact_url, valid_url
+from ..security import copy_url, display_url, valid_url
 from ..timefmt import local_stamp
 
 from PySide6.QtCore import Qt
@@ -322,7 +322,7 @@ def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None,
             continue
         k = QLabel(f"<b>{key}</b>")
         k.setStyleSheet(f"color:{dlg.text_col};")
-        v = QLabel(redact_url(str(val)) if key in ("URL", "Homepage") else str(val))
+        v = QLabel(display_url(str(val)) if key in ("URL", "Homepage") else str(val))
         v.setTextFormat(Qt.PlainText)
         v.setStyleSheet(f"color:{dlg.text_col};")
         v.setWordWrap(True)
@@ -333,10 +333,22 @@ def station_info(parent, mode: str, row: dict, extra_labels: dict | None = None,
     grid.setColumnStretch(1, 1)
     dlg.body.addLayout(grid)
     copy = QPushButton("Copy URL")
-    copy.clicked.connect(lambda: QApplication.clipboard().setText(redact_url(row.get("url", ""))))
+    copy.clicked.connect(lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
     close = QPushButton("Close")
     close.clicked.connect(dlg.accept)
-    dlg.add_buttons(copy, close)
+    from ..websearch import open_search, song_of, station_of
+    searches = []
+    if song_of(row):
+        song_button = QPushButton("Search song")
+        song_button.setToolTip("Search the web for the song playing now")
+        song_button.clicked.connect(lambda: open_search(song_of(row)))
+        searches.append(song_button)
+    if station_of(row):
+        station_button = QPushButton("Search station")
+        station_button.setToolTip("Search the web for this station's name")
+        station_button.clicked.connect(lambda: open_search(station_of(row)))
+        searches.append(station_button)
+    dlg.add_buttons(copy, *searches, close)
     dlg.exec()
 
 

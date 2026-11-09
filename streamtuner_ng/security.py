@@ -187,6 +187,34 @@ def tokenized_url(value: str) -> str:
     return value
 
 
+def copy_url(value: object) -> str:
+    """The working stream address for Copy URL: an explicit user action, so the address is not masked.
+    Only the legacy AudioAddict keys are still stripped (``tokenized_url``)."""
+    return tokenized_url(value) if isinstance(value, str) else ''
+
+
+def display_url(value: object) -> str:
+    """The address as drawn in the table and Station Info: the real path and query are shown, but the
+    value of a credential-looking parameter (token, api_key, key, session, ...) and a user:password
+    part are hidden, so a screen share never leaks one. A query with unnamed parts is hidden whole."""
+    value = copy_url(value)
+    try:
+        url = urlsplit(value)
+        if not url.scheme or not url.netloc:
+            return value
+        host = url.netloc.rsplit('@', 1)[-1]
+        parts = []
+        for part in url.query.split('&') if url.query else []:
+            if '=' not in part:
+                return urlunsplit((url.scheme, host, url.path, 'REDACTED', ''))
+            key, val = part.split('=', 1)
+            private = is_secret_key(key) or key.lower() in ('key', 'auth', 'sig', 'signature', 'jwt', 'session', 'ticket')
+            parts.append(f'{key}=[redacted]' if private and val else part)
+        return urlunsplit((url.scheme, host, url.path, '&'.join(parts), url.fragment))
+    except (ValueError, UnicodeError):
+        return '[invalid URL]'
+
+
 def redact_url(value: object) -> str:
     if not isinstance(value, str):
         return ''

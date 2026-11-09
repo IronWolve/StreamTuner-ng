@@ -4,7 +4,7 @@ big lists (Qt's strength; DECISIONS D2). Sorting/filtering via a proxy in the vi
 
 from __future__ import annotations
 
-from ..security import redact_url, station_rows
+from ..security import display_url, station_rows
 from ..timefmt import local_stamp
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -134,7 +134,7 @@ class StationModel(QAbstractTableModel):
                 return local_stamp(val)              # stored as UTC text; drawn in the computer's own time
             return str(val)
         if key in ("url", "homepage"):
-            return redact_url(val)
+            return display_url(val)
         if key == "title":
             title = str(val)
             if self.fav_provider and self.fav_provider(row.get("url", "")):
@@ -174,6 +174,8 @@ class StationModel(QAbstractTableModel):
 
     def set_rows(self, rows: list[dict], *, validated=False) -> None:
         rows = list(rows) if validated else station_rows(rows)
+        seen: set[str] = set()                     # a station listed again (under another genre) shows once, at its first place
+        rows = [row for row in rows if not (row["url"] in seen or seen.add(row["url"]))]
         self.beginResetModel()
         self._rows = rows
         self._positions.clear()

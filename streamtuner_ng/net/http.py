@@ -5,6 +5,7 @@ import ipaddress
 import json
 import queue
 import socket
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -44,14 +45,90 @@ class RequestDeadlineExceeded(requests.Timeout):
 
 _context_local = threading.local()
 
+BACKGROUND_FANOUT = 3          # parallel fetches inside one background call (a user's own request may use more)
+_gauge_lock = threading.Lock()
+_gauge = {"now": 0, "peak": 0}
+
 
 def _current_context():
     return getattr(_context_local, "request", None), getattr(_context_local, "session_key", None)
 
 
+def is_background() -> bool:
+    """True inside a background call (Reload all, the periodic refresh): it must not crowd out the music."""
+    return bool(getattr(_context_local, "background", False))
+
+
 @contextmanager
-def request_context(deadline: float | None, cancel_event=None):
+def thread_priority(low: bool = True):
+    """Run this thread at the operating system's background priority (Windows: background mode, which also
+    lowers its disk and network priority). Elsewhere a thread's priority cannot be raised back by an
+    ordinary user, and the workers are shared, so nothing is changed there."""
+    handle = None
+    if low and sys.platform.startswith("win"):
+        try:
+            import ctypes
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentThread.restype = ctypes.c_void_p
+            kernel.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            handle = kernel.GetCurrentThread()
+            if not kernel.SetThreadPriority(handle, 0x00010000):      # THREAD_MODE_BACKGROUND_BEGIN
+                handle = None
+        except Exception:  # noqa: BLE001 — priority is a courtesy, never a failure
+            handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                ctypes.windll.kernel32.SetThreadPriority(handle, 0x00020000)   # THREAD_MODE_BACKGROUND_END
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def run_low(fn, *args, **kwargs):
+    """Call ``fn`` at background priority (for lookups that are not provider calls)."""
+    with thread_priority(True):
+        return fn(*args, **kwargs)
+
+
+def connections() -> tuple[int, int]:
+    """(requests under way now, most at once since ``reset_connection_peak``). The player's own stream is not counted."""
+    with _gauge_lock:
+        return _gauge["now"], _gauge["peak"]
+
+
+def reset_connection_peak() -> None:
+    with _gauge_lock:
+        _gauge["peak"] = _gauge["now"]
+
+
+@contextmanager
+def _counted():
+    with _gauge_lock:
+        _gauge["now"] += 1
+        _gauge["peak"] = max(_gauge["peak"], _gauge["now"])
+    try:
+        yield
+    finally:
+        with _gauge_lock:
+            _gauge["now"] -= 1
+
+
+@contextmanager
+def request_context(deadline: float | None, cancel_event=None, background: bool | None = None):
     """Apply a shared provider-call deadline and cancellation event in this thread."""
+    previous_background = is_background()
+    _context_local.background = previous_background if background is None else bool(background)
+    try:
+        with _request_context(deadline, cancel_event):
+            yield
+    finally:
+        _context_local.background = previous_background
+
+
+@contextmanager
+def _request_context(deadline: float | None, cancel_event=None):
     previous, _key = _current_context()
     if previous is not None and previous[0] is not None:
         deadline = min(deadline, previous[0]) if deadline is not None else previous[0]
@@ -78,17 +155,22 @@ def session_scope(key):
 def bind_request_context(fn):
     """Capture the current request/session context for a provider fanout task."""
     policy, key = _current_context()
+    background = is_background()
 
     @wraps(fn)
     def wrapped(*args, **kwargs):
         old_policy, old_key = _current_context()
+        old_background = is_background()
         _context_local.request = policy
         _context_local.session_key = key
+        _context_local.background = background
         try:
-            return fn(*args, **kwargs)
+            with thread_priority(background):
+                return fn(*args, **kwargs)
         finally:
             _context_local.request = old_policy
             _context_local.session_key = old_key
+            _context_local.background = old_background
 
     return wrapped
 
@@ -99,6 +181,8 @@ def map_with_context(fn, values, max_workers: int):
     if not items:
         return []
     count = max(1, min(int(max_workers), 32, len(items)))
+    if is_background():
+        count = min(count, BACKGROUND_FANOUT)
     results = queue.Queue()
     fanout_cancel = threading.Event()
     policy, key = _current_context()
@@ -388,7 +472,8 @@ class _Session(requests.Session):
             try:
                 request_kwargs = dict(kwargs)
                 request_kwargs['timeout'] = _bounded_timeout(request_kwargs['timeout'])
-                response = super().request(method, url, allow_redirects=False, **request_kwargs)
+                with _counted():
+                    response = super().request(method, url, allow_redirects=False, **request_kwargs)
             except (RequestCancelled, RequestDeadlineExceeded):
                 raise
             except (requests.RequestException, OSError) as exc:

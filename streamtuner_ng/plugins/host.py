@@ -54,6 +54,7 @@ class _CallJob:
     playback: bool
     box: dict[str, Any]
     done: threading.Event
+    background: bool = False
 
 
 class _PluginWorkers:
@@ -154,9 +155,10 @@ class _PluginWorkers:
                     job.box["deadline"] = True
                     continue
                 try:
-                    from ..net.http import request_context, session_scope
+                    from ..net.http import request_context, session_scope, thread_priority
                     cancellation = (job.cancel_event, job.external_cancel_event)
-                    with request_context(job.deadline, cancellation), session_scope((job.host._session_scope, job.cid)):
+                    with request_context(job.deadline, cancellation, job.background), thread_priority(job.background), \
+                            session_scope((job.host._session_scope, job.cid)):
                         job.box["data"] = job.fn(*job.args)
                 except BaseException as exc:  # the airlock contains arbitrary plugin failures
                     job.box["exc"] = exc
@@ -284,8 +286,12 @@ class PluginHost:
 
     # ---- THE AIRLOCK ----
     def call(self, cid: str, method: str, *args, timeout: float = DEFAULT_TIMEOUT,
-             cancel_event: threading.Event | None = None, playback: bool = False) -> Result:
-        """Run channel.<method>(*args) behind the guard. Never raises."""
+             cancel_event: threading.Event | None = None, playback: bool = False,
+             background: bool = False) -> Result:
+        """Run channel.<method>(*args) behind the guard. Never raises.
+
+        ``background`` marks work nobody is waiting for (Reload all, the periodic refresh): its fetches run at
+        the system's background priority and at most a few at a time, so playing music is not disturbed."""
         channel = self.channels.get(cid)
         if channel is None:
             return Result(Status.ERROR, message=f"no such plugin: {cid}")
@@ -315,7 +321,7 @@ class PluginHost:
         cancel_event = threading.Event()       # timeout for this provider cannot cancel sibling calls
         deadline = time.monotonic() + max(0.0, timeout)
         job = _CallJob(self, cid, method, fn, args, deadline, cancel_event,
-                       external_cancel_event, playback, box, done)
+                       external_cancel_event, playback, box, done, background)
         if not _plugin_workers.submit(job):
             with self._lock:
                 self._release_call_slot(cid, playback)

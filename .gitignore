@@ -135,6 +135,7 @@
 !/streamtuner_ng/songhistory.py
 !/streamtuner_ng/songnow.py
 !/streamtuner_ng/timefmt.py
+!/streamtuner_ng/websearch.py
 !/streamtuner_ng/discord_presence.py
 !/streamtuner_ng/favicons.py
 !/streamtuner_ng/net/__init__.py

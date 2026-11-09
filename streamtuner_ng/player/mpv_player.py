@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import math
 import threading
+import time
 from typing import Callable
 
 from ..security import redact_text, valid_url
@@ -53,6 +54,9 @@ class Player:
         self._dll_handles = []
         self._volume = 70
         self._current = ""
+        self.preroll_secs = 0                 # Options -> Cache & Data -> Stream buffer; 0 starts at once
+        self._preroll_gen = 0
+        self._pre_paused = False
         self._entry_ids = set()
         self._end_errors = {}
         self._event_lock = threading.Lock()
@@ -83,7 +87,7 @@ class Player:
             opts = dict(video=False, idle=True, cache=True,
                         config=False, load_unsafe_playlists=False,
                         tls_verify=True,
-                        demuxer_max_bytes="8MiB",
+                        demuxer_max_bytes="16MiB",
                         network_timeout=15)        # dead/stalled streams fail fast — no infinite hang
             if sys.platform.startswith("linux"):
                 import certifi
@@ -106,6 +110,21 @@ class Player:
                             raise
                     else:
                         opts[option.replace("-", "_")] = False
+            finally:
+                mpv._mpv_destroy(probe)
+            # A cushion against dropouts (collect ~3 s before resuming, keep 10 s ahead, a half-second sound
+            # buffer). Each is probed first: a player build without one of them simply goes without.
+            probe = mpv._mpv_create()
+            try:
+                for option, value in (("cache-pause-wait", "3"), ("demuxer-readahead-secs", "10"),
+                                      ("cache-secs", "10"), ("audio-buffer", "0.5")):
+                    try:
+                        mpv._mpv_set_option_string(probe, option.encode(), value.encode())
+                    except AttributeError as exc:
+                        if len(exc.args) < 2 or exc.args[1] not in (-5, -6, -7):   # not found / bad format / bad value
+                            raise
+                    else:
+                        opts[option.replace("-", "_")] = float(value) if "." in value else int(value)
             finally:
                 mpv._mpv_destroy(probe)
             self._mpv = mpv.MPV(**opts)
@@ -148,13 +167,38 @@ class Player:
             return False
         try:
             self.error = ""
+            self._preroll_gen += 1
+            wait = max(0, min(30, int(self.preroll_secs or 0)))
+            if wait or self._pre_paused:
+                self._mpv.pause = bool(wait)             # hold the sound until the pre-roll is collected
+                self._pre_paused = bool(wait)
             self._mpv.play(url)
+            if wait:
+                threading.Thread(target=self._release_after, args=(self._preroll_gen, wait), daemon=True,
+                                 name="stream-preroll").start()
             self._current = url
             self._entry_ids = {entry['id'] for entry in (self._mpv.playlist or []) if 'id' in entry}
             return True
         except Exception as exc:  # noqa: BLE001
             self.error = redact_text(exc)
             return False
+
+    def _release_after(self, gen: int, wait: int) -> None:
+        """Start the sound once ``wait`` seconds of the station are collected (never longer than wait + 10 s)."""
+        deadline = time.monotonic() + wait + 10
+        while gen == self._preroll_gen and time.monotonic() < deadline:
+            try:
+                if float(self._mpv.demuxer_cache_duration or 0) >= wait:
+                    break
+            except Exception:  # noqa: BLE001 — property not there yet while the stream opens
+                pass
+            time.sleep(0.25)
+        if gen == self._preroll_gen and self._mpv is not None:
+            try:
+                self._mpv.pause = False
+            except Exception:  # noqa: BLE001
+                pass
+            self._pre_paused = False
 
     @property
     def playback_error(self) -> str:
@@ -172,9 +216,13 @@ class Player:
 
     def stop(self) -> None:
         self._current = ""
+        self._preroll_gen += 1                    # a pre-roll still collecting must not start the sound later
         if self.available:
             try:
                 self._mpv.stop()
+                if self._pre_paused:
+                    self._mpv.pause = False
+                    self._pre_paused = False
             except Exception:  # noqa: BLE001
                 pass
 

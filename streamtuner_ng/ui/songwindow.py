@@ -247,6 +247,10 @@ class SongHistoryWindow(QWidget):
         play = menu.addAction("Play this station")
         play.setEnabled(bool(entry.get("row")))
         play.triggered.connect(lambda: self._play(item))
+        from ..websearch import open_search
+        search = menu.addAction("Search the web for this song")
+        search.setEnabled(bool(entry.get("song")))
+        search.triggered.connect(lambda: open_search(entry["song"]))
         menu.addSeparator()
         for label, part in (("Copy song", "song"), ("Copy artist", "artist"), ("Copy title", "title"),
                             ("Copy station", "station")):
