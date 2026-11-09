@@ -16,6 +16,67 @@ from .plugins.result import Status
 from .security import backup_bundle, csv_cell, station_rows, valid_url
 
 
+_USER_PLUGIN = '''\
+from streamtuner_ng.plugins.base import Channel, make_row
+
+
+class SelftestUser(Channel):
+    id = "selftestuser"
+    title = "Selftest User Plugin"
+    priority = "standard"
+
+    def update_categories(self):
+        return ["Rock", "Jazz"]
+
+    def update_streams(self, category, search=None):
+        return [make_row(category + " one", "https://selftest.example/one"),
+                make_row(category + " two", "https://selftest.example/two")]
+'''
+
+_USER_FILES = '''\
+from streamtuner_ng.plugins.base import Channel, make_row
+
+
+class SelftestFiles(Channel):
+    id = "selftestfiles"
+    title = "Selftest Files Plugin"
+    priority = "standard"
+    local_files = True
+
+    def update_categories(self):
+        return ["Music"]
+
+    def update_streams(self, category, search=None):
+        return [make_row("Track", "file:///music/a.mp3")]
+'''
+
+
+def _user_plugin_checks(check, config, host) -> None:
+    """A user's own plugin, dropped in the settings folder as plain source, loads and works."""
+    from .plugins.loader import load_user_plugins, user_plugin_dir
+    folder = Path(config.dir) / 'plugins'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'selftestuser.py').write_text(_USER_PLUGIN, encoding='utf-8')
+    (folder / 'selftestfiles.py').write_text(_USER_FILES, encoding='utf-8')
+    classes, errors = load_user_plugins(config)
+    ids = sorted(cls.id for cls in classes)
+    check('user plugins in the settings folder load from plain .py files',
+          ids == ['selftestfiles', 'selftestuser'] and not errors, f'{ids} {errors}' if errors else '')
+    for cls in classes:
+        host.register(cls(config))
+        host.set_enabled(cls.id, True)
+    cats = host.categories('selftestuser')
+    rows = host.streams('selftestuser', 'Rock')
+    check('a user plugin lists its categories and stations',
+          cats.ok and list(cats.data) == ['Rock', 'Jazz'] and rows.ok
+          and [row['url'] for row in rows.data] == ['https://selftest.example/one', 'https://selftest.example/two'])
+    files = host.streams('selftestfiles', 'Music')
+    check('a user plugin that opted in keeps its file:// stations',
+          files.ok and [row['url'] for row in files.data] == ['file:///music/a.mp3'])
+    usable = user_plugin_dir(config)
+    check('the folder for user plugins exists and can be written', usable.is_dir() and os.access(usable, os.W_OK))
+
+
 def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
     checks = []
 
@@ -44,6 +105,7 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         check('providers load from the installed plugin directories', len(provider_files) >= 12 and
               all(path.parent in provider_roots for path in provider_files))
 
+        _user_plugin_checks(check, config, host)
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
         check('local file URLs only for opted-in plugins', valid_url('file:///music/a.pls', local=True)
               and not valid_url('file:///music/a.pls') and not valid_url('file:///music/a.pls', local=True, web=True))
