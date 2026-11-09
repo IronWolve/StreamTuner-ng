@@ -54,6 +54,17 @@ compatibility. They are not copied into releases. Updates must preserve custom
 files in the adjacent plugins/ directory. The _example.py reference is not
 rewritten over local edits at startup.
 
+**System-wide installs (for example a Debian package under `/opt`).** The install folder is read-only
+for you, so your own plugins go in `plugins/` inside the settings folder (`~/.config/streamtuner-ng/plugins/`).
+The app creates that folder, with `_example.py` in it, the first time it starts; the supplied providers
+keep loading from the install. Tools → Open Plugins Folder opens it.
+
+**Checking what loads.** `streamtuner-ng --plugins` lists the plugin folders, every provider that loads
+and from which file, and any that fail (with the file and the error); it exits with 1 when one fails.
+`streamtuner-ng --plugins --probe` also asks your own plugins for their first category and its stations
+(add ids to ask others: `--probe somafm`), and says why a row would be refused, such as a `file://`
+station without `local_files = True`.
+
 
 ## Writing a channel
 
