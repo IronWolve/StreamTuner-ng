@@ -6,6 +6,8 @@ default — a logo doesn't read at tray size). Returns None when no tray host is
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -145,8 +147,14 @@ def build_tray(window, host, player):
     refresh_colors()
     tray.setContextMenu(menu)
 
+    last = [0.0]
+
     def _activated(reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            now = time.monotonic()
+            if now - last[0] < QApplication.doubleClickInterval() / 1000:
+                return                               # a double-click reports twice: show it once, do not show-and-hide
+            last[0] = now
             window._toggle_window()
 
     tray.activated.connect(_activated)

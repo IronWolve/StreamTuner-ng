@@ -3262,7 +3262,10 @@ class MainWindow(QMainWindow):
             self.hide()
             self._sync_visualizer()
         else:
-            self.showNormal()
+            if self.windowState() & Qt.WindowMaximized:
+                self.showMaximized()                 # it comes back as it was left, not shrunk to its normal size
+            else:
+                self.showNormal()
             self.raise_()
             self.activateWindow()
             self._sync_visualizer()

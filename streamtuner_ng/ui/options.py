@@ -12,16 +12,32 @@ from pathlib import Path
 
 from ..security import MAX_IMPORT_BYTES, backup_bundle
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFontComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
-    QSizePolicy,
+    QSizePolicy, QAbstractSpinBox,
 )
 
 from . import theme
 from .dialogs import StyledDialog, info, log_viewer
 from .worker import run_cache, run_credentials, run_io
+
+
+class _WheelGuard(QObject):
+    """A mouse wheel over a box that was not clicked scrolls the page instead of changing the box (a theme or
+    font would otherwise change, and be saved, while the user only scrolls past it)."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel and not obj.hasFocus():
+            parent = obj.parentWidget()
+            while parent is not None and not isinstance(parent, QScrollArea):
+                parent = parent.parentWidget()
+            if parent is not None:
+                QCoreApplication.sendEvent(parent.viewport(), ev)
+            ev.accept()
+            return True
+        return False
 
 
 class OptionsDialog(StyledDialog):
@@ -69,6 +85,11 @@ class OptionsDialog(StyledDialog):
         tabs.addTab(self._scroll(self._tray_tab()), "Tray")
         tabs.addTab(self._scroll(self._data_tab()), "Cache && Data")   # && -> literal "&" (not a mnemonic)
         self.body.addWidget(tabs)
+        self._wheel_guard = _WheelGuard(self)
+        for kind in (QComboBox, QAbstractSpinBox, QSlider):
+            for box in self.findChildren(kind):
+                box.setFocusPolicy(Qt.StrongFocus)           # a wheel turn passing over a box only scrolls the page
+                box.installEventFilter(self._wheel_guard)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         self.add_buttons(close)
