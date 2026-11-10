@@ -92,6 +92,7 @@ def run_app() -> int:
             if sys.stderr is not None:
                 sys.stderr.write("desktop integration: " + text + "\n")     # visible from a terminal
     run_io(lambda: integrate_appimage(config, asset_path("logo.png")), _desktop_note)
+    run_io(win._song_history.ensure_loaded, lambda *_: None)      # read the song history off the window thread
     import threading
     boot_cancel = threading.Event()
     app.aboutToQuit.connect(boot_cancel.set)

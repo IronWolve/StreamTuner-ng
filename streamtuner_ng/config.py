@@ -267,6 +267,33 @@ class Config:
         self._enqueue_snapshot(name, snapshot)
         return True
 
+    def save_shared(self, name: str, data: dict) -> bool:
+        """Save a store whose entries are never changed once added (the song history), sharing the entry
+        dicts with the queued write instead of deep-copying all of them on the caller's thread: with a long
+        history that copy took hundreds of milliseconds at every new song."""
+        if not isinstance(data, dict):
+            return self.save(name, data)
+        path = self._path(name)
+        with self._write_condition:
+            if path in self._protected_files:
+                message = f"{name}.json is unreadable and was preserved; refusing to replace it."
+                self._write_errors.append(message)
+                self._failed_writes[name] = message
+                raise OSError(message)
+            asynchronous = self._async_writes
+        if not asynchronous:
+            try:
+                self._write_json(path, data, indent=2)
+            except Exception as exc:
+                self._record_write_error(f"{name}.json save failed: {type(exc).__name__}: {exc}", failed_name=name)
+                raise
+            with self._write_condition:
+                self._failed_writes.pop(name, None)
+            return True
+        snapshot = {key: tuple(value) if isinstance(value, list) else copy.deepcopy(value) for key, value in data.items()}
+        self._enqueue_snapshot(name, snapshot)
+        return True
+
     def save_station_snapshot(self, name: str, data: dict) -> bool:
         """Save Favorites/Local copy-on-write rows without deep-copying every row.
 

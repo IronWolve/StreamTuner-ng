@@ -58,13 +58,38 @@ class SongHistory:
     def __init__(self, config) -> None:
         self._config = config
         self._lock = threading.Lock()
-        self.entries: list[dict] = []
+        self._load_lock = threading.Lock()
+        self._entries: list[dict] = []
+        self._loaded = False
         self._dirty = False
-        data = config.load(NAME)
-        items = data.get("entries") if isinstance(data, dict) else None
-        if isinstance(items, list):
-            self.entries = [e for e in map(_clean, items[:MAX_ENTRIES]) if e is not None]
-            self.entries.sort(key=lambda e: e["t"])
+
+    # The saved file is read the first time the list is needed, not when the window opens: with a long
+    # history that read took most of a second before the window appeared. The app asks for it on a
+    # background thread right after the window shows (``ensure_loaded``).
+    def ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        with self._load_lock:
+            if self._loaded:
+                return
+            data = self._config.load(NAME)
+            items = data.get("entries") if isinstance(data, dict) else None
+            loaded: list[dict] = []
+            if isinstance(items, list):
+                loaded = [e for e in map(_clean, items[:MAX_ENTRIES]) if e is not None]
+                loaded.sort(key=lambda e: e["t"])
+            self._entries = loaded
+            self._loaded = True
+
+    @property
+    def entries(self) -> list[dict]:
+        self.ensure_loaded()
+        return self._entries
+
+    @entries.setter
+    def entries(self, value: list[dict]) -> None:
+        self._entries = value
+        self._loaded = True
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -76,6 +101,7 @@ class SongHistory:
         if not song:
             return None
         station, service = _text(station), _text(service)
+        self.ensure_loaded()
         with self._lock:
             last = self.entries[-1] if self.entries else None
             if last and last["song"] == song and last["station"] == station and last["service"] == service:
@@ -91,6 +117,7 @@ class SongHistory:
         return entry
 
     def remove(self, victims: list[dict]) -> int:
+        self.ensure_loaded()
         ids = {id(v) for v in victims}
         with self._lock:
             before = len(self.entries)
@@ -103,6 +130,7 @@ class SongHistory:
         return removed
 
     def clear(self) -> int:
+        self.ensure_loaded()
         with self._lock:
             count = len(self.entries)
             self.entries = []
@@ -111,17 +139,21 @@ class SongHistory:
         return count
 
     def snapshot(self) -> list[dict]:
+        self.ensure_loaded()
         with self._lock:
             return list(self.entries)
 
     def save(self) -> bool:
         """Queue the whole list for writing. The config writer keeps only the newest queued copy of
-        a file, so a late older write can never replace a newer one."""
+        a file, so a late older write can never replace a newer one. Entries are never changed after they
+        are added, so the write shares them instead of copying every one."""
+        if not self._loaded:
+            return True                       # never read, so nothing here to write: the file on disk stays as it is
         with self._lock:
-            payload = {"version": 1, "entries": list(self.entries)}
+            payload = {"version": 1, "entries": list(self._entries)}
             self._dirty = False
         try:
-            self._config.save(NAME, payload)
+            self._config.save_shared(NAME, payload)
         except (OSError, ValueError):
             with self._lock:
                 self._dirty = True
