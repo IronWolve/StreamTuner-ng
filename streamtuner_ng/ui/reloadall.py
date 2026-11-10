@@ -9,6 +9,7 @@ summary once the open list has loaded.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 
@@ -21,11 +22,24 @@ PARALLEL = 2
 PAUSE_WHILE_PLAYING_MS = 1000
 
 
+class EitherEvent:
+    """Reads as set when either of two events is: a fetch stops for its own feed's reasons or for this run's."""
+
+    def __init__(self, first, second) -> None:
+        self._first, self._second = first, second
+
+    def is_set(self) -> bool:
+        return self._first.is_set() or self._second.is_set()
+
+
 class ReloadAll:
     def __init__(self, window) -> None:
         self.w = window
         self.running = False
         self.cancelled = False
+        self.stop = threading.Event()               # set by Cancel and at quit: fetches under way stop too
+        self._pumping = False
+        self._again = False
         self.queue: deque = deque()
         self.active = 0
         self.active_feeds: set[str] = set()
@@ -85,6 +99,7 @@ class ReloadAll:
         self.done = self.refreshed = self.active = 0
         self.active_feeds.clear()
         self.cancelled = False
+        self.stop = threading.Event()
         self.running = True
         reset_connection_peak()
         if self.has_open:
@@ -99,8 +114,17 @@ class ReloadAll:
         if not self.running:
             return
         self.cancelled = True
+        self.stop.set()                             # lists already being fetched stop at once, not after their 45 s
         self.queue.clear()
         self.w.statusBar().showMessage("Reload all: cancelling…")
+
+    def shutdown(self) -> None:
+        """The window is closing: stop everything, silently."""
+        self.cancelled = True
+        self.stop.set()
+        self.queue.clear()
+        self.running = False
+        self._wait.stop()
 
     def _limit(self) -> int:
         return 1 if self.w._music_playing() else PARALLEL
@@ -115,17 +139,28 @@ class ReloadAll:
         return None
 
     def _pump(self) -> None:
-        while not self.cancelled and self.queue and self.active < self._limit():
-            job = self._next()
-            if job is None:
-                return                                          # every waiting feed is busy; a finish pumps again
-            cid, cat = job
-            self.active += 1
-            self.active_feeds.add(cid)
-            if cat == "__categories__":
-                self._categories(cid)
-            else:
-                self.w._bg_refresh(cid, cat, lambda ok, c=cid: self._finished(ok, c))
+        if self._pumping:                                       # a list that finishes at once calls back in here:
+            self._again = True                                  # loop instead of nesting one call per list
+            return
+        self._pumping = True
+        try:
+            while True:
+                self._again = False
+                while not self.cancelled and self.queue and self.active < self._limit():
+                    job = self._next()
+                    if job is None:
+                        break                                   # every waiting feed is busy; a finish pumps again
+                    cid, cat = job
+                    self.active += 1
+                    self.active_feeds.add(cid)
+                    if cat == "__categories__":
+                        self._categories(cid)
+                    else:
+                        self.w._bg_refresh(cid, cat, lambda ok, c=cid: self._finished(ok, c), also_cancel=self.stop)
+                if not self._again:
+                    return
+        finally:
+            self._pumping = False
 
     def _finished(self, ok: bool, cid: str | None = None) -> None:
         self.active = max(0, self.active - 1)
@@ -142,7 +177,7 @@ class ReloadAll:
 
     def _categories(self, cid: str) -> None:
         w = self.w
-        cancel = w._cache_event(cid)
+        cancel = EitherEvent(w._cache_event(cid), self.stop)
 
         def fetch():
             return w.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel, background=True)

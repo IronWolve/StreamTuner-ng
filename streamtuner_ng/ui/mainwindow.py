@@ -2480,9 +2480,10 @@ class MainWindow(QMainWindow):
         self._cache_label.setToolTip(f"{len(self._cache)} cached lists; {self._cache.row_count:,} rows")
 
 
-    def _bg_refresh(self, cid, cat, done=None) -> None:
+    def _bg_refresh(self, cid, cat, done=None, also_cancel=None) -> None:
         """Fetch one list again in the background and save it. `done(ok)` is called once, with whether
-        the saved copy was replaced (Reload all counts these)."""
+        the saved copy was replaced (Reload all counts these). `also_cancel` is an extra event that stops
+        the fetch (Reload all's own)."""
         key = (cid, cat)
         if self._closing or cid in self.INTERNAL_CHANNELS or not cat or key in self._bg_inflight \
                 or key == self._loading_key:
@@ -2494,6 +2495,9 @@ class MainWindow(QMainWindow):
         self._bg_inflight.add(key)
         epoch, generation = self._cache_epoch.get(cid, 0), self._cache_generation
         cancel = self._cache_event(cid)
+        if also_cancel is not None:
+            from .reloadall import EitherEvent
+            cancel = EitherEvent(cancel, also_cancel)
         ch = self.host.channels[cid]
         def refresh():
             categories = self.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel, background=True)
@@ -3522,6 +3526,8 @@ class MainWindow(QMainWindow):
         self._load_cancel.set()
         self._play_cancel.set()
         self._icon_cancel.set()
+        if self._reload_all_job is not None:
+            self._reload_all_job.shutdown()
         for event in self._cache_events.values():
             event.set()
         self._play_gen += 1
