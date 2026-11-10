@@ -175,7 +175,7 @@ class _PluginWorkers:
                     job.box["deadline"] = True
             finally:
                 with job.host._lock:
-                    job.host._release_call_slot(job.cid, job.playback)
+                    job.host._release_call_slot(job.cid, job.playback, job.background)
                 with self.lock:
                     self.lane_load[lane] -= 1
                     self.pending -= 1
@@ -209,6 +209,7 @@ class PluginHost:
         self._active: dict[str, int] = {}
         self._active_regular: dict[str, int] = {}
         self._active_playback: dict[str, int] = {}
+        self._active_background: dict[str, int] = {}     # background calls under way per provider (at most one)
         self._slots = threading.BoundedSemaphore(16)
         self._regular_slots = threading.BoundedSemaphore(14)
         self._playback_slots = threading.BoundedSemaphore(2)
@@ -307,6 +308,9 @@ class PluginHost:
             active = self._active_playback if playback else self._active_regular
             per_provider_limit = 1 if playback else 2
             reserved_slots = self._playback_slots if playback else self._regular_slots
+            if background and not playback and self._active_background.get(cid, 0) >= 1:
+                # nobody waits for background work: it leaves the second slot for the user's own click
+                return Result(Status.TIMEOUT, message="a background refresh of this provider is already running")
             if active.get(cid, 0) >= per_provider_limit or not reserved_slots.acquire(blocking=False):
                 return Result(Status.TIMEOUT, message="previous plugin requests are still running")
             if not self._slots.acquire(blocking=False):
@@ -314,6 +318,8 @@ class PluginHost:
                 return Result(Status.TIMEOUT, message="plugin request capacity is busy")
             active[cid] = active.get(cid, 0) + 1
             self._active[cid] = self._active.get(cid, 0) + 1
+            if background and not playback:
+                self._active_background[cid] = self._active_background.get(cid, 0) + 1
 
         box: dict[str, Any] = {}
         done = threading.Event()
@@ -324,7 +330,7 @@ class PluginHost:
                        external_cancel_event, playback, box, done, background)
         if not _plugin_workers.submit(job):
             with self._lock:
-                self._release_call_slot(cid, playback)
+                self._release_call_slot(cid, playback, background)
             # Queue pressure is host capacity, not evidence that this provider
             # is unhealthy; keep its crash budget and health state untouched.
             return Result(Status.BUSY, message="plugin worker queue is full")
@@ -444,10 +450,12 @@ class PluginHost:
             return self._record(cid, Result(Status.EMPTY, data=data if data else [], message="no results"))
         return self._record(cid, Result(Status.OK, data=data))
 
-    def _release_call_slot(self, cid: str, playback: bool) -> None:
+    def _release_call_slot(self, cid: str, playback: bool, background: bool = False) -> None:
         self._active[cid] -= 1
         active = self._active_playback if playback else self._active_regular
         active[cid] -= 1
+        if background and not playback:
+            self._active_background[cid] -= 1
         (self._playback_slots if playback else self._regular_slots).release()
         self._slots.release()
 
