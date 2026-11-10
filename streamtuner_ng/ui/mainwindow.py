@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
         self.act_reload = QAction("Reload", self, triggered=self._reload)
-        self.act_fav = QAction("★ Favorite", self, checkable=True, triggered=self._toggle_favourite)
+        self.act_fav = QAction("Favorite", self, checkable=True, triggered=self._toggle_favourite)   # its star is the icon
         self.act_add_local = QAction("Add station…", self, triggered=self._add_local)
         self.act_add_local.setShortcut("Ctrl+N")
         self.act_add_local.setToolTip("Add one or more direct stream URLs to Local")
@@ -213,6 +213,11 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_reload)
         tb.addAction(self.act_add_local)
         tb.addAction(self.act_fav)
+        fav_button = tb.widgetForAction(self.act_fav)
+        if fav_button is not None:
+            fav_button.setObjectName("favButton")                  # the theme does not light the whole button when checked
+            fav_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._paint_favourite_star(self.config.get("theme", "dark"))
         tb.addSeparator()                       # | between Favorite and the transport
         tb.addWidget(QLabel(" Search: "))
         self.search = QLineEdit()
@@ -2509,6 +2514,35 @@ class MainWindow(QMainWindow):
         custom = (self.config.get("wallpaper_image", "") or "").strip()
         return custom or theme.theme_wallpaper(mode)
 
+    def _paint_favourite_star(self, mode: str) -> None:
+        """The Favorite button's star: a plain outline when the station is not a favourite, a filled gold star
+        when it is. Only the star lights up, never the whole button."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPolygonF
+        dark = theme.is_dark(mode)
+        gold = QColor("#edc064" if dark else "#a06c00")
+        outline = QColor(*theme._theme(mode)["text"])
+        outline.setAlpha(190)
+        points = QPolygonF([QPointF(x, y) for x, y in ((8, 1.5), (10.1, 5.8), (14.8, 6.4), (11.4, 9.7), (12.3, 14.4),
+                                                       (8, 12.1), (3.7, 14.4), (4.6, 9.7), (1.2, 6.4), (5.9, 5.8))])
+        icon = QIcon()
+        for state, fill in ((QIcon.Off, None), (QIcon.On, gold)):
+            for icon_mode in (QIcon.Normal, QIcon.Disabled):
+                pixmap = QPixmap(32, 32)
+                pixmap.setDevicePixelRatio(2)
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                ink = QColor(fill if fill is not None else outline)
+                if icon_mode == QIcon.Disabled:
+                    ink.setAlpha(80)
+                painter.setPen(QPen(ink, 1.4))
+                painter.setBrush(ink if fill is not None else Qt.NoBrush)
+                painter.drawPolygon(points)
+                painter.end()
+                icon.addPixmap(pixmap, icon_mode, state)
+        self.act_fav.setIcon(icon)
+
     def _apply_appearance(self, mode: str) -> None:
         """Apply theme + wallpaper + font together: palette, a translucency-aware stylesheet, the app
         font, and the wallpaper pixmap. Used at startup and on every theme/wallpaper/font change."""
@@ -2523,6 +2557,7 @@ class MainWindow(QMainWindow):
         f.setPixelSize(px)
         app.setFont(f)
         app.setPalette(theme.palette(mode))                              # keep OS dark-mode from bleeding in
+        self._paint_favourite_star(mode)
         shown = self._apply_wallpaper(spec)       # first: the panels are only see-through when an image sits behind them
         app.setStyleSheet(theme.stylesheet(mode, translucent=shown, font_family=fam, font_px=px))
         tray = getattr(self, "_tray", None)

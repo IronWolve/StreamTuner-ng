@@ -367,6 +367,8 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     }}
     QPushButton:hover, QToolButton:hover {{ background: {on}; color: {on_text}; border-color: {on}; }}
     QPushButton:checked, QToolButton:checked {{ background: {green}; color: {green_text}; }}
+    QToolButton#favButton:checked {{ background: {panel2}; color: {text}; }}
+    QToolButton#favButton:checked:hover {{ background: {on}; color: {on_text}; }}
     QSlider::groove:horizontal {{ height: 6px; background: {groove}; border-radius: 3px; }}
     QSlider::sub-page:horizontal {{ height: 6px; background: {green}; border-radius: 3px; }}
     QSlider::handle:horizontal {{

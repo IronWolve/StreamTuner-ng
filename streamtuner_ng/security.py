@@ -146,11 +146,28 @@ def clean_extra(value: object, columns: list | None = None) -> dict | None:
     return out or None
 
 
+# An ordinary address: scheme://host[:port][/path...] with a plain ASCII host, no user name, no brackets and no
+# control character, space or backslash anywhere. Everything that matches is exactly what the full check below
+# accepts (the port range is checked in code); everything else goes through the full check, so this can only say yes.
+_PLAIN_URL = re.compile(r'([A-Za-z][A-Za-z0-9+.-]{0,9})://[A-Za-z0-9][A-Za-z0-9.-]*(?::([0-9]{1,5}))?'
+                        r'(?:[/?#][^\x00-\x20\x7f\\]*)?\Z', re.ASCII)
+
+
 def valid_url(value: object, *, token: bool = False, web: bool = False, local: bool = False) -> bool:
     """`local` admits file:// station URLs. It is granted only to a plugin that sets
     `local_files = True`; stores, imports and web links never pass it."""
     if not isinstance(value, str) or not value or len(value) > MAX_URL:
         return False
+    plain = _PLAIN_URL.match(value)
+    if plain is not None:
+        port = plain.group(2)
+        if (port is None or 1 <= int(port) <= 65535) and \
+                plain.group(1).lower() in ({'http', 'https'} if web else NETWORK_SCHEMES):
+            return True
+    return _valid_url_full(value, token=token, web=web, local=local)
+
+
+def _valid_url_full(value: str, *, token: bool = False, web: bool = False, local: bool = False) -> bool:
     if any(ord(c) <= 32 or ord(c) == 127 for c in value) or '\\' in value:
         return False
     try:

@@ -620,11 +620,13 @@ class Config:
             path = self._cache_path(cid, cat)
             if path.is_symlink() or path.stat().st_size > self._cache_max_bytes:
                 return None
-            with path.open(encoding="utf-8") as f:
-                d = json.load(f, parse_constant=_invalid_constant)
+            text = path.read_text(encoding="utf-8")
+            d = json.loads(text, parse_constant=_invalid_constant)
             if not isinstance(d, dict):
                 return None
-            d, changed = self._migrate_legacy_urls(d)
+            changed = False
+            if "prem" in text.lower():              # only an old AudioAddict address (prem<n>.<domain>) is ever rewritten
+                d, changed = self._migrate_legacy_urls(d)
             if changed:
                 self._write_json(path, d, max_bytes=self._cache_max_bytes)
             rows = self._cache_rows(cat, d.get("rows"))
