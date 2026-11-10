@@ -33,11 +33,11 @@ Ready-to-run packages are available on the [Releases page](https://github.com/Ir
 
 | Platform | Package | Requirements |
 | :-- | :-- | :-- |
-| **Linux** | x64 AppImage | glibc 2.35 or newer; Ubuntu 22.04 baseline |
+| **Linux** | x64 AppImage, or a `.deb` for Debian and Ubuntu | glibc 2.35 or newer; Ubuntu 22.04 baseline. Tested on Ubuntu 22.04 and 26.04, Debian 13 and Rocky Linux 10 |
 | **Windows** | x64 application | Windows 10 (1809 or later) or Windows 11 |
 | **macOS** | Apple silicon application | macOS 15 or newer |
 
-The Linux AppImage includes its playback engine and Python runtime. Keep your custom `plugins/` folder beside the AppImage when updating.
+The Linux AppImage includes its playback engine and Python runtime. It needs FUSE 2 (`libfuse2`, or `fuse-libs` on Rocky); without it, start it with `--appimage-extract-and-run`. It does not run on Rocky/RHEL 9 or 8 or CentOS 7 (too old a glibc). Keep your custom `plugins/` folder beside the AppImage when updating.
 
 ## Features
 
@@ -45,6 +45,7 @@ Browse the built-in directories alongside your **Favorites** and **Local** stati
 
 | Service | Free listening | Go to their site for Premium Services |
 | :-- | :--: | :-- |
+| **AudioAddict** (DI.FM and sister networks) | 🔑 Listen key | Enter your premium listen key in the service's right-click menu |
 | **FIP** | ✅ Yes | Public radio, free for listeners |
 | **iHeartRadio** | ✅ Yes | Optional ad-free listening and on-demand features |
 | **Jamendo** | ✅ Yes | Free music catalog |
@@ -71,6 +72,7 @@ Playback, browsing, and customization features include:
 - **Wallpapers**: Choose the Synthwave grid, either Vaporwave background, or your own image under **Options → Themes → Wallpaper**. Adjust the dim slider to keep station lists readable.
 - **Colors**: Choose from 47 BS-Notepad palettes under **View → Colors**. Hover to preview a color card; click to apply and save. Your current theme stays unchanged until you click.
 - **Python plugins**: Drop a `.py` provider into the adjacent `plugins/` folder and restart. For AppImages, this folder sits beside the AppImage; no extraction is needed. Open it through **Tools → Open Plugins Folder**, then start with `_example.py` and the [plugin guide](PLUGINS.md). Plugins can declare their own right-click options without additional UI code. On a system-wide install (such as the Debian package) your plugins go in `~/.config/streamtuner-ng/plugins/`, created at the first start. When you run the AppImage it adds its own menu entry and icon for you the first time (set `desktop_integration` to `false` in the settings to stop that). `streamtuner-ng --plugins` lists what loads and what fails; add `--probe` to try your own plugins.
+- **Everyday controls**: **Enter** plays the selected station and **Space** switches to it (or stops the one playing). **Delete** removes the selected station from Local or Favorites. Click **Vol** to mute (or **Ctrl+M**, the Playback menu, your keyboard's mute key, or the tray menu); the volume is kept, so un-muting returns to the same level. A stream that drops tries again by itself before it gives up. Right-click the playing track to favorite it.
 - **Visualizers**: Choose a stereo VU meter or a scrolling visualization driven by audio levels in the player bar.
 - **Desktop integration**: Use the tray and notifications where your desktop supports them. Optional Discord Rich Presence is off by default. Loudness normalization and keyboard shortcuts are included; global media keys are supported on Windows.
 - **Cached browsing**: Disk caching speeds up repeat visits, while background refreshes update station lists. Use **Reload** or **F5** to request fresh results. **View → Reload all** (Shift+F5) fetches every saved list of every enabled service again in the background, with progress, the connections under way and a Cancel button. Services take turns, and while music plays it goes one list at a time with a short pause, at low priority, so the music does not skip. In Favorites, F5 also asks each station's stream which song it is announcing now (switch this off under Options → General).
@@ -94,7 +96,7 @@ Personalize the app and manage your saved data from these controls:
 
 ## Why it's solid
 
-Directory requests use timeouts and exception guards. The app disables repeatedly failing providers independently and keeps previously cached station lists available.
+Directory requests use timeouts and exception guards. A provider that keeps failing is switched off for the rest of that run without affecting the others (it is back at the next start, or when you Reload it), and previously cached station lists stay available. Big saved lists (100,000 stations) open quickly, and background refreshes wait while the window is hidden.
 
 These guards handle ordinary request failures. Plugins run inside the application with your account’s permissions, so install code only from authors you trust.
 
