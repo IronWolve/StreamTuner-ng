@@ -1988,6 +1988,13 @@ class MainWindow(QMainWindow):
             return                                   # nothing playing -> no menu
         from PySide6.QtWidgets import QApplication, QMenu
         menu = QMenu(self)
+        fav_row = dict(row)
+        fav_row.setdefault("_source", self._resolve_source(fav_row))
+        bm = self.host.channels.get("bookmarks")
+        if bm and fav_row.get("url"):
+            is_fav = bool(bm.is_favourite(fav_row["url"]))
+            menu.addAction("Remove favorite" if is_fav else "★ Favorite", lambda: self._toggle_favourite_row(fav_row))
+            menu.addSeparator()
         track = clean_icy_title(self._np_full or "")
         if track:
             menu.addAction("Copy playing track", lambda: QApplication.clipboard().setText(track))
