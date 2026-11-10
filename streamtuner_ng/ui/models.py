@@ -124,6 +124,24 @@ class StationModel(QAbstractTableModel):
         if extra and self._types:
             self._populated.update("x:" + k for k in extra if "x:" + k in self._types and extra[k] not in ("", 0))
 
+    def sort_value(self, row, key):
+        """The raw, comparable value a column sorts by, so numbers sort numerically."""
+        kind = self._types.get(key)
+        val = self._value(row, key)
+        if kind in ("int", "float"):
+            try:
+                return float(val or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        if key in _NUMERIC:
+            return int(val or 0)
+        return str(val).lower()
+
+    def sort_keys(self, column: int) -> list:
+        """The sort value of every row for one column, worked out once for a whole sort."""
+        key = self._cols[column][1]
+        return [self.sort_value(row, key) for row in self._rows]
+
     def filter_value(self, row, field):
         """The raw value a per-field filter compares (the favourite star and thousands commas never count)."""
         return self._value(row, field)
@@ -278,16 +296,7 @@ class StationModel(QAbstractTableModel):
         if role == Qt.DecorationRole and key == "title" and self.icon_provider is not None:
             return self.icon_provider(row)
         if role == SORT_ROLE:
-            # raw, comparable value so the proxy sorts numbers numerically
-            val = self._value(row, key)
-            if kind in ("int", "float"):
-                try:
-                    return float(val or 0)
-                except (TypeError, ValueError):
-                    return 0.0
-            if key in _NUMERIC:
-                return int(val or 0)
-            return str(val).lower()
+            return self.sort_value(row, key)
         if role == FILTER_ROLE:
             return self._search[index.row()]
         if role == Qt.TextAlignmentRole and (key in _NUMERIC or kind in ("int", "float")):

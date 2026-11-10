@@ -129,6 +129,47 @@ class StationProxy(QSortFilterProxyModel):
         self.field_filters: dict[str, dict] = {}
         self._kinds: dict[str, str] = {}
         self._compiled: dict[str, dict] = {}
+        self._sort_keys: list | None = None          # sort value of every source row for _sort_column
+        self._sort_column = -1
+        self._needle: str | None = None              # the quick filter's text, lower-cased (None: not a plain text filter)
+
+    def setSourceModel(self, model) -> None:
+        if model is not None:
+            # connected BEFORE the proxy connects its own handlers, so that when it re-sorts after a change it
+            # never meets keys from before that change
+            for signal in (model.modelReset, model.rowsInserted, model.rowsRemoved, model.layoutChanged, model.dataChanged):
+                signal.connect(self._drop_sort_keys)
+        super().setSourceModel(model)
+        self._drop_sort_keys()
+
+    def _drop_sort_keys(self, *_args) -> None:
+        self._sort_keys, self._sort_column = None, -1
+
+    def lessThan(self, left, right) -> bool:
+        """Compare two rows by keys worked out once per sort. Qt's own comparison asks the model for each
+        value through Python every time (about a second to sort 10,000 stations); this takes a fifth of that."""
+        model = self.sourceModel()
+        column = left.column()
+        keys = self._sort_keys
+        if keys is None or column != self._sort_column or len(keys) != model.rowCount():
+            keys = self._sort_keys = model.sort_keys(column)
+            self._sort_column = column
+        try:
+            return keys[left.row()] < keys[right.row()]
+        except (IndexError, TypeError):
+            return super().lessThan(left, right)
+
+    def setFilterFixedString(self, pattern: str) -> None:
+        self._needle = str(pattern).casefold()
+        super().setFilterFixedString(pattern)
+
+    def setFilterRegularExpression(self, *args) -> None:
+        self._needle = None
+        super().setFilterRegularExpression(*args)
+
+    def setFilterWildcard(self, pattern: str) -> None:
+        self._needle = None
+        super().setFilterWildcard(pattern)
 
     def set_field_filters(self, filters: dict[str, dict]) -> None:
         model = self.sourceModel()
@@ -141,8 +182,12 @@ class StationProxy(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, row: int, parent) -> bool:
-        if not super().filterAcceptsRow(row, parent):
-            return False
         model = self.sourceModel()
+        needle = self._needle
+        if needle is None or self.filterKeyColumn() != 0 or not hasattr(model, "_search"):
+            if not super().filterAcceptsRow(row, parent):
+                return False
+        elif needle and needle not in model._search[row]:         # the row's name, genre, country and so on, lower-cased
+            return False
         return all(matches(model, row, field, self._kinds.get(field, "text"), spec)
                    for field, spec in self._compiled.items())
