@@ -35,6 +35,27 @@ def _luminance(c) -> float:
     return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255
 
 
+def _channel(v: int) -> float:
+    v /= 255
+    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def ratio(a, b) -> float:
+    """WCAG contrast ratio between two (r, g, b) colors."""
+    def lum(c):
+        return 0.2126 * _channel(c[0]) + 0.7152 * _channel(c[1]) + 0.0722 * _channel(c[2])
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _selection_text(on, text: str) -> str:
+    """Text on the selection color: the theme's own text color when it reads (4.5:1), else black or white."""
+    fg = _from_hex(text)
+    if ratio(fg, on) >= 4.5:
+        return text
+    return max(("#000000", "#ffffff"), key=lambda k: ratio(_from_hex(k), on))
+
+
 def _contrast(c) -> str:
     """'black' or 'white' — whichever reads on a given background color."""
     return "black" if _luminance(c) > 0.55 else "white"
@@ -123,13 +144,31 @@ def _from_hex(value):
 
 for _color in COLOR_PALETTES:
     _bg, _fg = _from_hex(_color['bg']), _from_hex(_color['fg'])
-    _palette = _mk(_bg, _fg, _from_hex(_color['accent']), _mix(_bg, _fg, 0.22),
-                   _color['fg'], _color['dark'])
+    _on = _mix(_bg, _fg, 0.22)
+    _palette = _mk(_bg, _fg, _from_hex(_color['accent']), _on,
+                   _selection_text(_on, _color['fg']), _color['dark'])
     _palette.update(panel=_from_hex(_color['panel']), panel2=_from_hex(_color['bar']),
                     groove=_from_hex(_color['rule']), scroll=_from_hex(_color['rule']),
                     scroll_hi=_from_hex(_color['dim']))
     THEMES[_color['id']] = _palette
     THEME_LABELS[_color['id']] = _color['group'] + ' · ' + _color['name']
+
+
+def muted_text(mode: str) -> str:
+    """Secondary text (hints under a setting): the theme's text pulled toward its background, but never
+    below 4.5:1 on the window or panel color."""
+    p = _theme(mode)
+    for step in range(60, 101, 5):
+        color = _mix(p["bg"], p["text"], step / 100)
+        if min(ratio(color, p["bg"]), ratio(color, p["panel"])) >= 4.5:
+            return _hex(color)
+    return _hex(p["text"])
+
+
+def disabled_text(mode: str) -> tuple:
+    """Text of a control that is switched off: a bit over halfway from the theme's panel to its text."""
+    p = _theme(mode)
+    return _mix(p["panel"], p["text"], 0.6)
 
 
 def _theme(mode: str) -> dict:
@@ -285,6 +324,8 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     _lit = p["accent"] if mode in ("dark", "light") else p["on"]
     green, green_text = _rgb(_lit), _contrast(_lit)
     groove = _rgb(p["groove"])
+    dis = _rgb(disabled_text(mode))
+    panel_opaque = _rgb(p["panel"])
     scroll, scroll_hi = _rgb(p["scroll"]), _rgb(p["scroll_hi"])
     return f"""
     QMainWindow, QDialog {{ background: {bg}; }}
@@ -294,7 +335,7 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QMenu::item {{ padding: 5px 26px 5px 14px; border-radius: 4px; }}
     QMenuBar::item:selected, QMenu::item:selected {{ background: {on}; color: {on_text}; }}
     QMenu::separator {{ height: 1px; background: {panel2}; margin: 5px 8px; }}
-    QMenu::item:disabled {{ color: rgba(140,140,140,0.95); }}
+    QMenu::item:disabled {{ color: {dis}; }}
     QMenu::indicator {{ width: 14px; height: 14px; margin-left: 6px; }}
     QComboBox QAbstractItemView {{ border: 1px solid rgb(120,120,120); background: {panel}; }}
     QStatusBar {{ background: {panel}; color: {text}; }}
@@ -348,6 +389,8 @@ def stylesheet(mode: str = "dark", translucent: bool = False,
     QCheckBox {{ spacing: 8px; }}
     QTabBar::tab {{ background: {panel}; padding: 7px 14px; }}
     QTabBar::tab:selected {{ background: {on}; color: {on_text}; }}
+    QToolTip {{ background: {panel_opaque}; color: {text}; border: 1px solid {on}; padding: 3px 6px; }}
+    QWidget:disabled, QPushButton:disabled, QToolButton:disabled {{ color: {dis}; }}
     """
 
 

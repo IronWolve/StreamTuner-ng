@@ -47,7 +47,7 @@ class OptionsDialog(StyledDialog):
         self.config = config
         if self.config is not None:
             self.config.enable_async_writes()
-        self.muted = "#9aa3ad" if theme.is_dark(mode) else "#566070"   # secondary text, readable on dark/light
+        self.muted = theme.muted_text(mode)   # secondary text, readable on dark/light
         self.theme_changed.connect(self.apply_theme)
         self._closed = False
         self._operation_generation = 0
@@ -91,7 +91,7 @@ class OptionsDialog(StyledDialog):
     def apply_theme(self, mode: str) -> None:
         old_muted = self.muted
         super().apply_theme(mode)
-        self.muted = "#9aa3ad" if theme.is_dark(mode) else "#566070"
+        self.muted = theme.muted_text(mode)
         for widget in self.findChildren(QWidget):
             sheet = widget.styleSheet()
             if old_muted in sheet:
