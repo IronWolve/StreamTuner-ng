@@ -45,8 +45,8 @@ class IHeart(Channel):
             return cached
         rows: list[dict] = []
         seen: set[str] = set()
-        offset, total = 0, None
-        while (total is None or offset < total) and offset < 20000:   # hard safety cap
+
+        def page(offset: int) -> tuple[list, int]:
             http.check_request_context()
             d = http.get_json(f"{API}?limit={PAGE}&offset={offset}", timeout=20)
             if not isinstance(d, dict):
@@ -54,18 +54,36 @@ class IHeart(Channel):
             hits = d.get("hits")
             if not isinstance(hits, list) or "total" not in d:
                 raise ValueError("iHeart station page is missing required fields")
-            if total is None:
-                total = int(d.get("total") or 0)
-            if not hits:
-                if offset < total:
-                    raise ValueError("iHeart station directory ended before its reported total")
-                break
-            offset += len(hits)
+            return hits, int(d.get("total") or 0)
+
+        def add(hits: list) -> None:
             for r in self._map(hits):
                 if r["url"] not in seen:
                     seen.add(r["url"])
                     rows.append(r)
-        if total is not None and offset < total:
+
+        hits, total = page(0)
+        offset = len(hits)
+        add(hits)
+        if hits and len(hits) == PAGE and offset < total:
+            # Full pages: the rest of the directory is asked for side by side instead of one page after another
+            # (eight round trips in a row on a first open). The answers are put back in page order.
+            offsets = list(range(PAGE, min(total, 20000), PAGE))
+            for later in http.map_with_context(lambda o: page(o)[0], offsets, 4):
+                if not later:
+                    raise ValueError("iHeart station directory ended before its reported total")
+                offset += len(later)
+                add(later)
+            if offset < min(total, 20000):                  # a page came back short in the middle
+                raise ValueError("iHeart station directory ended before its reported total")
+        else:
+            while offset < total and offset < 20000:        # a short first page: follow the pages as they come
+                hits, _total = page(offset)
+                if not hits:
+                    raise ValueError("iHeart station directory ended before its reported total")
+                offset += len(hits)
+                add(hits)
+        if total and offset < total:
             raise ValueError("iHeart directory exceeds its supported safety limit")
         rows = self._snapshot_publish("stations", generation, rows)
         self._stations = rows
