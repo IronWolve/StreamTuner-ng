@@ -75,6 +75,7 @@ class Config:
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
         # keep favicon/cache dirs out of backups, like st2 did
         (self.icon_dir / ".nobackup").touch(exist_ok=True)
+        self._remove_stale_temp_files()
         loaded = self.load("settings")
         self.settings: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
         from .secrets import SecretStore
@@ -196,8 +197,45 @@ class Config:
             if failed_name:
                 self._failed_writes[failed_name] = message
 
+    STALE_TEMP_SECONDS = 600
+
+    def _remove_stale_temp_files(self) -> None:
+        """A save cut short (killed app, power loss) leaves its half-written ``tmp*.tmp`` file behind, and big
+        cache files make those large. Remove the ones this app made, in its own folders, once they are old."""
+        cutoff = time.time() - self.STALE_TEMP_SECONDS
+        for folder in (self.dir, self.cache_dir):
+            for path in folder.glob("tmp*.tmp"):
+                try:
+                    if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                        path.unlink()
+                except OSError:
+                    pass
+
+    _CHUNK_ROWS = 500
+
+    @classmethod
+    def _json_chunks(cls, data: Any, indent: int | None):
+        """The JSON text of ``data`` in pieces. A saved list is written a few hundred rows at a time through the
+        encoder's fast (compiled) path: the step-by-step encoder takes about twice as long for 50,000 rows."""
+        if indent is not None or not isinstance(data, dict):
+            yield from json.JSONEncoder(indent=indent, ensure_ascii=False, allow_nan=False).iterencode(data)
+            return
+        encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False)
+        yield "{"
+        for number, (key, value) in enumerate(data.items()):
+            yield ("," if number else "") + encoder.encode(str(key)) + ":"
+            if isinstance(value, list) and len(value) > cls._CHUNK_ROWS:
+                yield "["
+                for start in range(0, len(value), cls._CHUNK_ROWS):
+                    piece = encoder.encode(value[start:start + cls._CHUNK_ROWS])
+                    yield ("," if start else "") + piece[1:-1]
+                yield "]"
+            else:
+                yield encoder.encode(value)
+        yield "}"
+
     def _write_json(self, p: Path, data: Any, indent: int | None = None,
-                    max_bytes: int | None = None) -> None:
+                    max_bytes: int | None = None, sync: bool = True) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         limit = self._store_max_bytes if max_bytes is None else int(max_bytes)
         if limit <= 0:
@@ -206,14 +244,14 @@ class Config:
         written = 0
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                encoder = json.JSONEncoder(indent=indent, ensure_ascii=False, allow_nan=False)
-                for chunk in encoder.iterencode(data):
+                for chunk in self._json_chunks(data, indent):
                     written += len(chunk.encode("utf-8"))
                     if written > limit:
                         raise ValueError(f"JSON file exceeds the supported {limit}-byte limit")
                     f.write(chunk)
                 f.flush()
-                os.fsync(f.fileno())
+                if sync:
+                    os.fsync(f.fileno())
             with self._write_lock:
                 if p.is_symlink():
                     raise OSError("Refusing to overwrite a symlinked data file")
@@ -560,12 +598,16 @@ class Config:
             except OSError as exc:
                 self._record_write_error(f"Cache cleanup failed: {type(exc).__name__}: {exc}")
 
-    def cache_save(self, cid: str, cat: str, rows: list) -> bool:
+    def cache_save(self, cid: str, cat: str, rows: list, trusted: bool = False) -> bool:
+        """Write one list to the disk cache. ``trusted`` rows already went through the plugin host's checks, so
+        they are not checked a second time (that was half of a big list's save time). A cache file is rebuilt
+        from the network if it is ever damaged, so it is not forced to disk with fsync."""
         try:
             path = self._cache_path(cid, cat)
+            rows = list(rows) if trusted and cat != "__categories__" and isinstance(rows, list) else self._cache_rows(cat, rows)
             self._write_json(path,
-                             {"cid": cid, "cat": cat, "ts": time.time(), "rows": self._cache_rows(cat, rows)},
-                             max_bytes=self._cache_max_bytes)
+                             {"cid": cid, "cat": cat, "ts": time.time(), "rows": rows},
+                             max_bytes=self._cache_max_bytes, sync=False)
             self._trim_cache_disk(protect=path)
             return True
         except (OSError, TypeError, ValueError) as exc:

@@ -173,6 +173,8 @@ def valid_url(value: object, *, token: bool = False, web: bool = False, local: b
 
 def tokenized_url(value: str) -> str:
     """Remove legacy AudioAddict keys before persistence or display."""
+    if 'prem' not in value.lower():
+        return value                  # only a host named prem<digits>.<domain> is rewritten: skip the URL parse
     try:
         url = urlsplit(value)
         host = url.hostname or ''

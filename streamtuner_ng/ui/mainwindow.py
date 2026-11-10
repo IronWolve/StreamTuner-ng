@@ -3472,7 +3472,7 @@ class MainWindow(QMainWindow):
 
     def _save_catalog(self, cid, cat, rows):
         cancel = self._cache_event(cid)
-        run_cache(lambda snapshot=list(rows): self.config.cache_save(cid, cat, snapshot),
+        run_cache(lambda snapshot=list(rows): self.config.cache_save(cid, cat, snapshot, trusted=True),
                   lambda *_: None, key=(cid, cat), cancelled=cancel)
 
     def _before_cache_clear(self):
