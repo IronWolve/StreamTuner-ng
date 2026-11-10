@@ -22,6 +22,8 @@ TRAY_ICONS: dict[str, tuple[str, str]] = {
     "antenna":    ("📡", "Broadcast"),
 }
 DEFAULT_TRAY_ICON = "note"
+MUTED_EMOJI = "🔇"            # the tray icon and the Mute entry show this while the sound is muted
+UNMUTED_EMOJI = "🔊"
 
 
 def emoji_icon(emoji: str, size: int = 64) -> QIcon:
@@ -95,6 +97,14 @@ def build_tray(window, host, player):
     menu.addSeparator()
     play_action = menu.addAction("Play / Stop", lambda: window._toggle_play())   # no "checked" argument: it would read as Stop
     stop_action = menu.addAction("Stop", window._stop)
+    mute_action = menu.addAction("Mute", lambda: window._toggle_mute())
+    mute_action.setIcon(emoji_icon(UNMUTED_EMOJI))
+
+    def sync_mute(muted: bool) -> None:
+        mute_action.setText("Unmute" if muted else "Mute")
+        mute_action.setIcon(emoji_icon(MUTED_EMOJI if muted else UNMUTED_EMOJI))
+
+    menu.sync_mute = sync_mute
     menu.addSeparator()
 
     fav_menu = menu.addMenu("Favorites")

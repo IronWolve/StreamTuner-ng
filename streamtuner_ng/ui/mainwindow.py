@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
             self._viz = "vu" if self.config.get("show_vu", True) else "off"
         self._notifications = bool(self.config.get("notifications", True))  # OS now-playing toasts
         self._last_notified_title = ""        # de-dupe: only notify when the track title changes
+        self._muted = False                       # mute is never remembered: the app always starts with sound
         self._normalize = bool(self.config.get("normalize", False))   # loudness normalization (dynaudnorm)
         self._discord = None                  # Discord Rich Presence (created lazily when enabled)
         self._discord_pending = None          # throttle: latest queued presence (tuple, or "CLEAR")
@@ -568,6 +569,19 @@ class MainWindow(QMainWindow):
         self.vol.setValue(self.player.volume)
         self.vol.valueChanged.connect(self.player.set_volume)
         self.vol.valueChanged.connect(lambda v: self.config.set("volume", v))   # saved on close
+        self.vol.valueChanged.connect(lambda _v: self._set_muted(False))        # moving the slider un-mutes
+        self.vol.sliderPressed.connect(lambda: self._set_muted(False))
+        self.btn_vol = QPushButton("Vol")            # a click mutes / un-mutes (always starts un-muted)
+        self.btn_vol.setObjectName("volButton")
+        self.btn_vol.setFlat(True)
+        self.btn_vol.setCursor(Qt.PointingHandCursor)
+        self.btn_vol.setFocusPolicy(Qt.NoFocus)
+        self.btn_vol.setStyleSheet(
+            "QPushButton#volButton { border: none; background: transparent; padding: 4px 6px; }"
+            "QPushButton#volButton:hover { background: transparent; text-decoration: underline; }"
+            "QPushButton#volButton[muted=\"true\"] { color: rgb(239,119,113); font-weight: bold; }")
+        self.btn_vol.setToolTip("Click to mute  (Ctrl+M)")
+        self.btn_vol.clicked.connect(lambda *_: self._toggle_mute())
         self.vu = VuMeter()                          # live stereo level meter
         self.vu.setVisible(self._viz == "vu")
         self.spectro = Spectrogram()                 # alternative viz — same slot, resizable
@@ -583,7 +597,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self.vu)
         h.addWidget(self.spectro)
         h.addWidget(self._vsep())               # | between the visualization and the volume
-        h.addWidget(QLabel("Vol"))
+        h.addWidget(self.btn_vol)
         h.addWidget(self.vol)
         h.addWidget(self.btn_norm)
         self._central_layout.insertWidget(0, bar)   # top, right under the toolbar
@@ -662,6 +676,10 @@ class MainWindow(QMainWindow):
         m_play.addAction(self.act_play)
         m_play.addAction(self.act_stop)
         m_play.addSeparator()
+        self.act_mute = QAction("Mute", self, checkable=True)
+        self.act_mute.setShortcut("Ctrl+M")
+        self.act_mute.triggered.connect(lambda on=False: self._set_muted(bool(on)))
+        m_play.addAction(self.act_mute)
         self.act_normalize = QAction("Normalize loudness", self, checkable=True)
         self.act_normalize.setChecked(self._normalize)
         self.act_normalize.toggled.connect(self._toggle_normalize)
@@ -2728,9 +2746,48 @@ class MainWindow(QMainWindow):
             self._bg_refresh(cid, cat)
 
 
+    def _toggle_mute(self) -> None:
+        self._set_muted(not getattr(self, "_muted", False), announce=True)
+
+    def _set_muted(self, on: bool, announce: bool = False) -> None:
+        """Mute or un-mute the app's own sound. The volume (slider, saved setting) is left alone, so un-muting
+        returns to the same level. Every control for it (Vol button, Ctrl+M, menu, tray, volume key) lands here."""
+        on = bool(on)
+        if on == getattr(self, "_muted", False):
+            return
+        self._muted = on
+        setter = getattr(self.player, "set_muted", None)
+        if setter is not None:
+            setter(on)
+        button = getattr(self, "btn_vol", None)
+        if button is not None:
+            button.setText("Muted" if on else "Vol")
+            button.setProperty("muted", on)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.setToolTip("Click to un-mute  (Ctrl+M)" if on else "Click to mute  (Ctrl+M)")
+        action = getattr(self, "act_mute", None)
+        if action is not None and action.isChecked() != on:
+            action.setChecked(on)
+        self._refresh_tray_mute()
+        if announce:
+            self.statusBar().showMessage("Muted" if on else f"Volume {self.vol.value()}%", 2000)
+
+    def _refresh_tray_mute(self) -> None:
+        tray = getattr(self, "_tray", None)
+        if tray is None:
+            return
+        from .tray import tray_icon, MUTED_EMOJI, emoji_icon
+        tray.setIcon(emoji_icon(MUTED_EMOJI) if self._muted else tray_icon(self.config))
+        sync = getattr(tray.contextMenu(), "sync_mute", None)
+        if sync is not None:
+            sync(self._muted)
+        self._update_tray_np(getattr(self, "_tray_np_text", ""))
+
     def _nudge_volume(self, delta: int) -> None:
         """Bump the app's OWN (mpv) volume — bound to the Volume keys + Ctrl+Up/Down, so when the
         app is focused they control playback volume instead of the system mixer."""
+        self._set_muted(False)                                  # a volume key always brings the sound back
         self.vol.setValue(max(0, min(100, self.vol.value() + delta)))   # moves slider -> set_volume + save
         self.statusBar().showMessage(f"Volume {self.vol.value()}%", 1500)
 
@@ -2745,6 +2802,7 @@ class MainWindow(QMainWindow):
         sc(Qt.Key_MediaTogglePlayPause, self._toggle_play)
         sc("Ctrl+.", self._stop)
         sc(Qt.Key_MediaStop, self._stop)
+        sc(Qt.Key_VolumeMute, self._toggle_mute)
         sc(Qt.Key_VolumeUp, lambda: self._nudge_volume(5))     # app volume when focused (not system)
         sc(Qt.Key_VolumeDown, lambda: self._nudge_volume(-5))
         sc("Ctrl+Up", lambda: self._nudge_volume(5))           # reliable in-app vol (Volume keys can be OS-grabbed)
@@ -3299,21 +3357,23 @@ class MainWindow(QMainWindow):
         tray = getattr(self, "_tray", None)
         if tray is None:
             return
-        from .tray import tray_icon
-        tray.setIcon(tray_icon(self.config))
+        from .tray import tray_icon, MUTED_EMOJI, emoji_icon
+        tray.setIcon(emoji_icon(MUTED_EMOJI) if getattr(self, "_muted", False) else tray_icon(self.config))
         tray.setVisible(bool(self.config.get("tray_enabled", True)))
 
     def _update_tray_np(self, text: str) -> None:
         tray = getattr(self, "_tray", None)
         if tray is None:
             return
+        self._tray_np_text = text
         label = (text or "").strip() or "Stopped"
         if len(label) > 60:
             label = label[:57] + "…"
         np = getattr(tray, "_np_action", None)
         if np is not None:
             np.setText(label)
-        tray.setToolTip(f"StreamTuner-ng — {label}" if label != "Stopped" else "StreamTuner-ng")
+        muted = " (muted)" if getattr(self, "_muted", False) else ""
+        tray.setToolTip((f"StreamTuner-ng — {label}" if label != "Stopped" else "StreamTuner-ng") + muted)
 
     def _list_message(self, message):
         self._list_notice.setText(self.config.redact(message))

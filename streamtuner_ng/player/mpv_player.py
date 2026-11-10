@@ -53,6 +53,7 @@ class Player:
         self._mpv = None
         self._dll_handles = []
         self._volume = 70
+        self._muted = False
         self._current = ""
         self.PREROLL_GRACE = 10               # extra seconds a pre-roll may take before the sound starts anyway
         self.preroll_secs = 0                 # Options -> Cache & Data -> Stream buffer; 0 starts at once
@@ -131,6 +132,7 @@ class Player:
                 mpv._mpv_destroy(probe)
             self._mpv = mpv.MPV(**opts)
             self._mpv.volume = self._volume
+            self._mpv.mute = self._muted
 
             @self._mpv.property_observer("metadata")
             def _on_meta(_name, value):   # pragma: no cover (needs audio); runs on mpv's thread
@@ -309,6 +311,19 @@ class Player:
     @property
     def volume(self) -> int:
         return self._volume
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, on: bool) -> None:
+        """Silence the sound without touching the volume, so un-muting returns to the same level."""
+        self._muted = bool(on)
+        if self.available:
+            try:
+                self._mpv.mute = self._muted
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_volume(self, v: int) -> None:
         self._volume = max(0, min(100, int(v)))
