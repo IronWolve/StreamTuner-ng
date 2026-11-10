@@ -19,6 +19,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 MARKER = "X-StreamTuner-Managed=true"
@@ -83,11 +84,27 @@ def _icons(home: Path, source: Path, app_id: str, force: bool) -> int:
     return written
 
 
+def _bundle_dirs(env: dict) -> list[str]:
+    """Folders that belong to this app's own bundle (an AppImage mount, the frozen app folder)."""
+    found = [env.get("APPDIR"), getattr(sys, "_MEIPASS", None)]
+    if getattr(sys, "frozen", False):
+        found.append(os.path.dirname(sys.executable))
+    return [os.path.realpath(p).rstrip("/") for p in found if p]
+
+
 def _system_env() -> dict:
-    """The environment without the AppImage's bundled library path, so system tools load system libraries."""
+    """The environment for a system tool: the bundle's library folders removed from LD_LIBRARY_PATH.
+
+    The AppImage points LD_LIBRARY_PATH at its own libraries (and the frozen app remembers the value it
+    found in LD_LIBRARY_PATH_ORIG). A system tool such as ``gio`` loaded against those old libraries dies
+    with a symbol error on a newer system (glib 2.88 on Ubuntu 26.04), so only folders outside the bundle stay."""
     env = dict(os.environ)
-    if "LD_LIBRARY_PATH_ORIG" in env:
-        env["LD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH_ORIG")
+    bundle = _bundle_dirs(env)
+    value = env.pop("LD_LIBRARY_PATH_ORIG", env.get("LD_LIBRARY_PATH", ""))
+    kept = [p for p in value.split(":") if p and not any(
+        os.path.realpath(p).rstrip("/") == b or os.path.realpath(p).startswith(b + "/") for b in bundle)]
+    if kept:
+        env["LD_LIBRARY_PATH"] = ":".join(kept)
     else:
         env.pop("LD_LIBRARY_PATH", None)
     env.pop("LD_PRELOAD", None)

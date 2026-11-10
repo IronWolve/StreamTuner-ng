@@ -112,6 +112,10 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         made = integrate(str(fake_image), asset_path('logo.png'), name=APP_NAME, app_id=APP_ID, home=Path(folder) / 'share', mark=False)
         entry = Path(folder) / 'share' / 'applications' / f'{APP_ID}.desktop'
         icon = Path(folder) / 'share' / 'icons' / 'hicolor' / '512x512' / 'apps' / f'{APP_ID}.png'
+        from .desktopentry import _bundle_dirs, _system_env
+        leaked = [p for p in _system_env().get('LD_LIBRARY_PATH', '').split(':')
+                  if p and any(os.path.realpath(p).startswith(b) for b in _bundle_dirs(dict(os.environ)))]
+        check('system tools run without the app bundle on the library path', not leaked, ':'.join(leaked))
         check('an AppImage can install its launcher entry and icon', made == 'created' and entry.is_file()
               and f'Icon={APP_ID}' in entry.read_text() and icon.is_file() and icon.stat().st_size > 1000, made)
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
