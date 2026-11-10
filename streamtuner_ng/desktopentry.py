@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,19 @@ from pathlib import Path
 MARKER = "X-StreamTuner-Managed=true"
 SIZES = (512, 256, 128, 64, 48)
 SETTING = "desktop_integration"
+
+# The AppImage build appends a small PNG of the app icon to the end of the file, followed by its length
+# (4 bytes, big-endian) and this tag. A thumbnailer can then read the icon with nothing but python3, never
+# running the AppImage, and so works inside GNOME's thumbnail sandbox, which cannot reach the home folder.
+ICON_MAGIC = b"STNGICN1"
+ICON_FOOTER = 12                      # 4 bytes of length + the 8-byte tag
+THUMB_SIZE = 256
+THUMBNAILER_NAME = "{app_id}-appimage.thumbnailer"
+THUMBNAILER_NOTE = "# Managed by StreamTuner-ng: shows its icon on its AppImage file (desktop_integration)."
+# Reads argv[1] (the AppImage) and writes the appended icon to argv[2]; exits 1 for any AppImage without it.
+THUMBNAILER_PY = ("import sys,struct;f=open(sys.argv[1],'rb');f.seek(-12,2);t=f.read(12);"
+                  "n=struct.unpack('>I',t[:4])[0] if t[4:]==b'STNGICN1' else 0;n or sys.exit(1);"
+                  "f.seek(-12-n,2);open(sys.argv[2],'wb').write(f.read(n))")
 
 
 def data_home() -> Path:
@@ -53,6 +67,85 @@ def entry_text(appimage: str, name: str, app_id: str, icon_stamp: str = "") -> s
     return "\n".join(lines) + "\n"
 
 
+def scaled_png(source: str | os.PathLike, size: int) -> bytes:
+    """The picture at ``source`` scaled to size x size, as PNG bytes."""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+    from PySide6.QtGui import QImage
+    image = QImage(str(source))
+    if image.isNull():
+        raise OSError(f"icon unreadable: {source}")
+    scaled = image.scaled(size, size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    data, buffer = QByteArray(), QBuffer()
+    buffer.setBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    scaled.save(buffer, "PNG")
+    buffer.close()
+    return bytes(data)
+
+
+def icon_footer(png: bytes) -> bytes:
+    """What the build appends to an AppImage: the icon, its length, the tag."""
+    return png + struct.pack(">I", len(png)) + ICON_MAGIC
+
+
+def read_icon_footer(path: str | os.PathLike) -> bytes | None:
+    """The icon appended to the file at ``path``, or None when it has none."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(-ICON_FOOTER, os.SEEK_END)
+            tail = handle.read(ICON_FOOTER)
+            if tail[4:] != ICON_MAGIC:
+                return None
+            length = struct.unpack(">I", tail[:4])[0]
+            if not 0 < length < 8 * 1024 * 1024:
+                return None
+            handle.seek(-ICON_FOOTER - length, os.SEEK_END)
+            png = handle.read(length)
+    except OSError:
+        return None
+    return png if png.startswith(b"\x89PNG") else None
+
+
+def thumbnailer_text() -> str:
+    return ("[Thumbnailer Entry]\n" + THUMBNAILER_NOTE + "\nTryExec=/usr/bin/python3\n"
+            f'Exec=/usr/bin/python3 -c "{THUMBNAILER_PY}" %i %o\nMimeType=application/vnd.appimage;\n')
+
+
+def _forget_failed_thumbnails(appimage: str) -> None:
+    """A thumbnail that failed before is not retried; drop any such record for this file."""
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    root = Path(cache) if cache and os.path.isabs(cache) else Path.home() / ".cache"
+    name = hashlib.md5(Path(appimage).as_uri().encode()).hexdigest() + ".png"
+    for record in (root / "thumbnails" / "fail").glob(f"*/{name}"):
+        try:
+            record.unlink()
+        except OSError:
+            pass
+
+
+def install_thumbnailer(appimage: str, home: Path, app_id: str) -> str:
+    """Install the user-level thumbnailer that draws the icon appended to this AppImage."""
+    if read_icon_footer(appimage) is None:
+        return "no icon appended to this AppImage"
+    target = home / "thumbnailers" / THUMBNAILER_NAME.format(app_id=app_id)
+    text = thumbnailer_text()
+    try:
+        if target.is_file():
+            current = target.read_text(encoding="utf-8", errors="replace")
+            if THUMBNAILER_NOTE not in current:
+                return "kept: a thumbnailer of your own exists"
+            if current == text:
+                return "unchanged"
+            status = "updated"
+        else:
+            status = "created"
+        _write(target, text.encode("utf-8"))
+        _forget_failed_thumbnails(appimage)
+    except OSError as exc:
+        return f"failed: {exc}"
+    return status
+
+
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name("." + path.name + ".tmp")
@@ -63,23 +156,12 @@ def _write(path: Path, data: bytes) -> None:
 
 def _icons(home: Path, source: Path, app_id: str, force: bool) -> int:
     """Write the icon at each size that is missing (all of them when ``force``); returns how many."""
-    from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
-    from PySide6.QtGui import QImage
-    image = QImage(str(source))
-    if image.isNull():
-        raise OSError(f"icon unreadable: {source}")
     written = 0
     for size in SIZES:
         target = home / "icons" / "hicolor" / f"{size}x{size}" / "apps" / f"{app_id}.png"
         if not force and target.is_file() and target.stat().st_size > 0:
             continue
-        scaled = image.scaled(size, size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        data, buffer = QByteArray(), QBuffer()
-        buffer.setBuffer(data)
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        scaled.save(buffer, "PNG")
-        buffer.close()
-        _write(target, bytes(data))
+        _write(target, scaled_png(source, size))
         written += 1
     return written
 
@@ -137,7 +219,8 @@ def mark_file(appimage: str, icon: Path, app_id: str) -> str:
 
 
 def integrate(appimage: str | None, icon_source: str | os.PathLike, *, name: str, app_id: str,
-              home: str | os.PathLike | None = None, enabled: bool = True, mark: bool = False) -> str:
+              home: str | os.PathLike | None = None, enabled: bool = True, mark: bool = False,
+              thumbs: bool = False) -> str:
     """Install or refresh the launcher entry and icons; returns what happened, as a short phrase.
     With ``mark`` the AppImage file also gets the app icon in the file manager."""
     if not enabled:
@@ -169,6 +252,8 @@ def integrate(appimage: str | None, icon_source: str | os.PathLike, *, name: str
             status = "updated"
         if mark:
             mark_file(appimage, base / "icons" / "hicolor" / "512x512" / "apps" / f"{app_id}.png", app_id)
+        if thumbs:
+            install_thumbnailer(appimage, base, app_id)
     except OSError as exc:
         return f"failed: {exc}"
     return status
@@ -178,4 +263,4 @@ def integrate_appimage(config, icon_source: str | os.PathLike) -> str:
     """Called at start-up: does nothing unless the app is running from an AppImage and the setting allows it."""
     from . import APP_ID, APP_NAME
     return integrate(os.environ.get("APPIMAGE"), icon_source, name=APP_NAME, app_id=APP_ID,
-                     enabled=bool(config.get(SETTING, True)), mark=True)
+                     enabled=bool(config.get(SETTING, True)), mark=True, thumbs=True)

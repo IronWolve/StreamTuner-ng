@@ -116,6 +116,27 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         leaked = [p for p in _system_env().get('LD_LIBRARY_PATH', '').split(':')
                   if p and any(os.path.realpath(p).startswith(b) for b in _bundle_dirs(dict(os.environ)))]
         check('system tools run without the app bundle on the library path', not leaked, ':'.join(leaked))
+        from .desktopentry import THUMBNAILER_PY, icon_footer, read_icon_footer, scaled_png
+        sample = Path(folder) / 'Appended.AppImage'
+        icon_png = scaled_png(asset_path('logo.png'), 64)
+        sample.write_bytes(b'\x7fELF-not-really' + icon_footer(icon_png))
+        check('an icon appended to an AppImage reads back', read_icon_footer(sample) == icon_png)
+        extracted = Path(folder) / 'extracted.png'
+        plain = Path(folder) / 'Plain.AppImage'
+        plain.write_bytes(b'\x7fELF-not-really' * 4)
+        outcomes = []
+        for source in (sample, plain):
+            saved = sys.argv
+            sys.argv = ['thumbnailer', str(source), str(extracted)]
+            try:
+                exec(THUMBNAILER_PY, {})
+                outcomes.append(0)
+            except SystemExit as stop:
+                outcomes.append(stop.code)
+            finally:
+                sys.argv = saved
+        check('the thumbnailer code extracts the icon and refuses other AppImages',
+              outcomes == [0, 1] and extracted.read_bytes() == icon_png, str(outcomes))
         check('an AppImage can install its launcher entry and icon', made == 'created' and entry.is_file()
               and f'Icon={APP_ID}' in entry.read_text() and icon.is_file() and icon.stat().st_size > 1000, made)
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
