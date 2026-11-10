@@ -358,11 +358,14 @@ def reject_reason(candidate: object) -> str:
 
 
 def station_rows(value: object, *, local: bool = False, rejected: list | None = None,
-                 columns: list | None = None, ignored: set | None = None) -> list[dict]:
+                 columns: list | None = None, ignored: set | None = None,
+                 notes: list | None = None) -> list[dict]:
     """Normalize rows. `rejected`, if given, receives one reason string per refused row."""
     if not isinstance(value, list):
         return []
     out, seen = [], set()
+    blanked: set[str] = set()
+    duplicates = 0
     for candidate in value[:MAX_ROWS]:
         row = station_row(candidate, local=local, columns=columns)
         if (ignored is not None and columns is not None and isinstance(candidate, dict)
@@ -371,7 +374,19 @@ def station_rows(value: object, *, local: bool = False, rejected: list | None = 
             ignored.update(str(k)[:24] for k in candidate['extra'] if k not in declared)
         if row is None and rejected is not None:
             rejected.append(reject_reason(candidate))
+        if row and isinstance(candidate, dict):
+            for key in ('homepage', 'favicon'):
+                if candidate.get(key) and not row[key]:
+                    blanked.add(key)
         if row and row['url'] not in seen:
             seen.add(row['url'])
             out.append(row)
+        elif row:
+            duplicates += 1
+    if notes is not None:
+        if blanked:
+            notes.append(f"{' and '.join(sorted(blanked))} given as something other than an http or https address "
+                         "was left empty on some rows")
+        if duplicates:
+            notes.append(f"{duplicates} row(s) repeated a station address already listed and were dropped")
     return out

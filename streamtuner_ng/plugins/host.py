@@ -367,7 +367,13 @@ class PluginHost:
 
         data = box.get("data")
         if method in ("update_categories", "refresh_categories"):
-            data = [x[:256] for x in data[:MAX_ROWS] if isinstance(x, str)] if isinstance(data, list) else []
+            if isinstance(data, list):
+                kept = [x[:256] for x in data[:MAX_ROWS] if isinstance(x, str)]
+                if len(kept) < len(data[:MAX_ROWS]):
+                    self._log(self.health[cid], f"{len(data[:MAX_ROWS]) - len(kept)} category name(s) that are not text were dropped")
+                data = kept
+            else:
+                data = []
         elif method in ("update_streams", "refresh_streams", "update_streams_page"):
             page = data if isinstance(data, Page) else None
             raw_rows = page.rows if page is not None else data
@@ -416,8 +422,11 @@ class PluginHost:
             local = bool(getattr(channel, "local_files", False))
             rejected: list[str] = []
             ignored: set[str] = set()
+            notes: list[str] = []
             columns = self.columns_for(cid)
-            data = station_rows(raw_rows, local=local, rejected=rejected, columns=columns, ignored=ignored)
+            data = station_rows(raw_rows, local=local, rejected=rejected, columns=columns, ignored=ignored, notes=notes)
+            for text in notes:                              # blanked homepages/favicons, repeated addresses: logged for authors
+                self._log(self.health[cid], text)
             note = ""
             if ignored:
                 self._log(self.health[cid], "row extra value(s) ignored, not declared in extra_columns: "
@@ -433,6 +442,8 @@ class PluginHost:
             message = ""
             if safe_errors or not complete:
                 message = f"partial results ({len(safe_errors)} provider request error(s))"
+                if note:
+                    message += f"; {note}"                  # refused rows are reported on partial results too
             if safe_errors or not complete:
                 return self._record(cid, Result(Status.PARTIAL, data=data, message=message,
                                                 has_more=has_more, next_offset=next_offset,
