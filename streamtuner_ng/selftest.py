@@ -84,7 +84,7 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
         checks.append({'name': name, 'passed': bool(passed), 'detail': detail})
         print(f'[{"PASS" if passed else "FAIL"}] {name}' + (f': {detail}' if detail else ''))
 
-    with tempfile.TemporaryDirectory(prefix='streamtuner-selftest-') as folder:
+    with tempfile.TemporaryDirectory(prefix='streamtuner-selftest-', ignore_cleanup_errors=True) as folder:
         config = Config(Path(folder))
         host = PluginHost(config)
         for cls in BUILTINS + [BrokenThrow, BrokenHang, BrokenGarbage]:
