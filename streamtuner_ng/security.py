@@ -208,8 +208,19 @@ def tokenized_url(value: str) -> str:
 
 def copy_url(value: object) -> str:
     """The working stream address for Copy URL: an explicit user action, so the address is not masked.
-    Only the legacy AudioAddict keys are still stripped (``tokenized_url``)."""
-    return tokenized_url(value) if isinstance(value, str) else ''
+    AudioAddict listen keys are stripped while retaining the actual stream address."""
+    if not isinstance(value, str):
+        return ''
+    if 'prem' not in value.lower():
+        return value
+    try:
+        url = urlsplit(value)
+        match = re.fullmatch(r'prem\d+\.(.+)', url.hostname or '')
+        if match and match.group(1) in AUDIOADDICT_DOMAINS:
+            return urlunsplit((url.scheme, url.netloc.rsplit('@', 1)[-1], url.path, '', ''))
+    except (ValueError, UnicodeError):
+        pass
+    return value
 
 
 def display_url(value: object) -> str:

@@ -54,6 +54,7 @@ class StationModel(QAbstractTableModel):
         self.icon_provider = None    # callable(row) -> QIcon | None  (station favicon)
         self.fav_provider = None     # callable(url) -> bool          (is favourited)
         self.source_provider = None  # callable(row) -> str           (service the row belongs to)
+        self.url_provider = None     # credential-free public address, separate from stored routing IDs
 
     ICON_ROLES = [Qt.DecorationRole, Qt.DisplayRole]
     ICON_FULL_AT = 400          # this many changed rows: announce the whole column, it is as cheap
@@ -157,6 +158,8 @@ class StationModel(QAbstractTableModel):
             self.dataChanged.emit(self.index(0, col), self.index(len(self._rows) - 1, col), [Qt.DisplayRole])
 
     def _value(self, row, key):
+        if key == "url" and self.url_provider is not None:
+            return self.url_provider(row)
         if key == "playing" and self.live_songs:
             return self.live_songs.get(row.get("url", "")) or row.get("playing", "")
         if key.startswith("x:"):
@@ -165,6 +168,13 @@ class StationModel(QAbstractTableModel):
         if key == "source":
             return (self.source_provider(row) if self.source_provider else row.get("_source", "")) or ""
         return row.get(key, "")
+
+    def refresh_url(self, url: str) -> None:
+        position = self._positions.get(url)
+        if position is not None:
+            column = next(i for i, (_label, key) in enumerate(self._cols) if key == "url")
+            index = self.index(position, column)
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, SORT_ROLE, FILTER_ROLE])
 
     def _display(self, row, key) -> str:
         """The text a cell shows (also what type-ahead and the clipped-cell tooltip use)."""

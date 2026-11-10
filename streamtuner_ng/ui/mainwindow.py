@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__
 from ..player.mpv_player import clean_icy_title
 from ..plugins.result import Result, Status
-from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, copy_url, redact_url, station_row, valid_url
+from ..security import MAX_IMPORT_BYTES, MAX_ROWS, csv_cell, copy_url, display_url, redact_url, station_row, valid_url
 from ..songhistory import SongHistory
 from . import theme
 from .models import COLUMNS, DEFAULT_HIDDEN, DEFAULT_WIDTH, DEFAULT_WIDTHS, FILTER_ROLE, SORT_ROLE, StationModel
@@ -265,6 +265,7 @@ class MainWindow(QMainWindow):
         self.model.fav_provider = bm.is_favourite if bm else None
         self.model.icon_provider = self._station_icon
         self.model.source_provider = self._source_label
+        self.model.url_provider = self._stream_address
         self.proxy = StationProxy()
         self.proxy.setSourceModel(self.model)
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -1924,7 +1925,7 @@ class MainWindow(QMainWindow):
         if row.get("bitrate"):
             parts.append(f"{row['bitrate']}k {row.get('format', '').replace('audio/', '')}".strip())
         if row.get("url"):
-            parts.append(row["url"])
+            parts.append(display_url(self._stream_address(row)))
         self.statusBar().showMessage("  ·  ".join(parts))
 
     def _station_menu(self, pos) -> None:
@@ -1945,7 +1946,7 @@ class MainWindow(QMainWindow):
         if self.current_channel == "local":
             menu.addAction("Remove from Local", lambda: self._remove_local_row(row))
         menu.addSeparator()
-        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
+        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(self._stream_address(row))))
         song = clean_icy_title(str(row.get("playing") or ""))
         if song:
             menu.addAction("Copy song", lambda: QApplication.clipboard().setText(song))     # what the station plays now
@@ -1978,7 +1979,8 @@ class MainWindow(QMainWindow):
         labels = {field[2:]: label for label, field in self.model.columns() if field.startswith("x:")}
         types = {field[2:]: self.model.column_type(field) for _label, field in self.model.columns()
                  if field.startswith("x:")}
-        station_info(self, self.config.get("theme", "dark"), row, extra_labels=labels, extra_types=types)
+        shown = dict(row, url=self._stream_address(row))
+        station_info(self, self.config.get("theme", "dark"), shown, extra_labels=labels, extra_types=types)
 
     def _nowplaying_menu(self, pos) -> None:
         """Right-click the now-playing text on the player bar: copy the track / stream URL, station
@@ -1998,7 +2000,7 @@ class MainWindow(QMainWindow):
         track = clean_icy_title(self._np_full or "")
         if track:
             menu.addAction("Copy playing track", lambda: QApplication.clipboard().setText(track))
-        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
+        menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(self._stream_address(row))))
         self._add_web_search(menu, row, song=track)
         menu.addSeparator()
         menu.addAction("Info…", lambda: self._station_info(row))
@@ -2098,6 +2100,16 @@ class MainWindow(QMainWindow):
             self._start_playback(row, None, generation)
 
 
+    def _stream_address(self, row: dict) -> str:
+        value = row.get("url", "")
+        if not value.startswith("audioaddict://"):
+            return value
+        channel = self.host.channels.get("audioaddict")
+        address = getattr(channel, "stream_address", None)
+        if getattr(channel, "id", None) == "audioaddict" and callable(address):
+            return address(row)
+        return row.get("url", "")
+
     def _resolve_source(self, row: dict) -> str:
         """Which channel resolves this row's URL: its origin if known (favourites/history
         remember it), else the current channel — with a fallback for legacy TuneIn links."""
@@ -2132,6 +2144,8 @@ class MainWindow(QMainWindow):
         if not valid_url(url, local=local):
             self._play_refused("This station did not resolve to a supported network stream")
             return
+        if row["url"].startswith("audioaddict://"):
+            self.model.refresh_url(row["url"])
         self.player.preroll_secs = int(self.config.get("stream_preroll_secs", 0) or 0)
         if not (self.player.play(url, local=True) if local else self.player.play(url)):
             self._status_error(self.config.redact(self.player.error or "Audio playback is unavailable"))

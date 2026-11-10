@@ -12,6 +12,8 @@ The plugin is off by default. Subscriber playback uses the provider-required HTT
 from __future__ import annotations
 
 import re
+import threading
+from collections import OrderedDict
 from urllib.parse import quote, urlsplit
 
 from ...net import http
@@ -59,6 +61,40 @@ class AudioAddict(Channel):
         {"type": "secret", "key": "audioaddict_listen_key", "label": "Listen Key",
          "placeholder": "your DI.FM / AudioAddict listen key"},
     ]
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self._addresses = OrderedDict()
+        self._address_lock = threading.Lock()
+
+    def _quality(self):
+        value = self.config.get("audioaddict_quality", "_hi") if self.config is not None else "_hi"
+        return value if isinstance(value, str) and value in _QUALITY_SETS else "_hi"
+
+    def stream_address(self, row: dict) -> str:
+        """Public stream address for the UI; routing IDs and credentials stay separate.
+
+        Use the playlist's actual mirror once resolved. Until then show the
+        canonical premium mirror and the network's documented quality mount.
+        This never reads a listen key or performs network work while painting.
+        """
+        value = row.get("url", "")
+        if not isinstance(value, str) or not value.startswith(_SCHEME) or not valid_url(value, token=True):
+            return value
+        quality = self._quality()
+        with self._address_lock:
+            cached = self._addresses.get((value, quality))
+        if cached:
+            return cached
+        parsed = urlsplit(value)
+        domain, channel = parsed.hostname, parsed.path.lstrip("/")
+        if domain in ("di.fm", "radiotunes.com"):
+            suffix = {"_hi": "_hi", "": "", "_aac": "_aac"}[quality]
+        else:
+            suffix = {"_hi": "", "": "_aac", "_aac": "_low"}[quality]
+            if domain == "zenradio.com":
+                channel = "zr" + channel
+        return f"http://prem1.{domain}/{channel}{suffix}"
 
     def update_categories(self) -> list[str]:
         return [label for label, _net, _domain in NETWORKS]
@@ -125,9 +161,7 @@ class AudioAddict(Channel):
         listen_key = ((self.config.get("audioaddict_listen_key", "") if self.config else "") or "").strip()
         if not listen_key:
             raise ValueError("An AudioAddict subscriber listen key is required")
-        q = ((self.config.get("audioaddict_quality", "_hi") if self.config else "_hi") or "")
-        if not isinstance(q, str) or q not in _QUALITY_SETS:
-            q = "_hi"
+        q = self._quality()
         quality, audio_format, bitrate = _QUALITY_SETS[q]
         playlist = http.get_text(
             PLAYLIST_API.format(net=_BY_DOMAIN[domain], quality=quality, channel=quote(ch, safe="")),
@@ -147,6 +181,11 @@ class AudioAddict(Channel):
                     or not re.fullmatch(r"/[A-Za-z0-9_-]+", parsed_stream.path)
                     or parsed_stream.query or parsed_stream.fragment):
                 continue
+            with self._address_lock:
+                self._addresses[(u, q)] = stream
+                self._addresses.move_to_end((u, q))
+                while len(self._addresses) > 512:
+                    self._addresses.popitem(last=False)
             return {**row, "url": f"{stream}?{quote(listen_key, safe='')}",
                     "format": audio_format, "bitrate": bitrate}
         raise ValueError("AudioAddict returned no valid premium stream for this station and quality")
