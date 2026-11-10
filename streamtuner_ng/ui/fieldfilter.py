@@ -63,6 +63,20 @@ def clean_spec(kind: str, spec: dict | None) -> dict | None:
     return out or None
 
 
+def compile_spec(kind: str, spec: dict) -> dict:
+    """A filter spec with its lowercased text, value set and day worked out once, so that testing a row
+    (done for every row, on every keystroke) does no repeated work."""
+    out = dict(spec)
+    if kind == "text":
+        if "contains" in spec:
+            out["_contains_cf"] = spec["contains"].casefold()
+        if "values" in spec:
+            out["_values_cf"] = frozenset(v.casefold() for v in spec["values"])
+    elif kind == "date":
+        out["_since_dt"] = parse_day(spec.get("since", ""))
+    return out
+
+
 def matches(model, src_row: int, field: str, kind: str, spec: dict) -> bool:
     row = model.row_at(src_row)
     if row is None:
@@ -70,9 +84,15 @@ def matches(model, src_row: int, field: str, kind: str, spec: dict) -> bool:
     raw = model.filter_value(row, field)
     if kind == "text":
         text = str(raw if raw is not None else "").casefold()
-        if "contains" in spec and spec["contains"].casefold() not in text:
+        contains = spec.get("_contains_cf")
+        if contains is None and "contains" in spec:
+            contains = spec["contains"].casefold()
+        if contains is not None and contains not in text:
             return False
-        if "values" in spec and text not in {v.casefold() for v in spec["values"]}:
+        values = spec.get("_values_cf")
+        if values is None and "values" in spec:
+            values = {v.casefold() for v in spec["values"]}
+        if values is not None and text not in values:
             return False
         return True
     if kind == "number":
@@ -85,7 +105,7 @@ def matches(model, src_row: int, field: str, kind: str, spec: dict) -> bool:
         return not ("max" in spec and number > spec["max"])
     if kind == "date":
         moment = parse_utc(raw)
-        since = parse_day(spec.get("since", ""))
+        since = spec["_since_dt"] if "_since_dt" in spec else parse_day(spec.get("since", ""))
         return moment is not None and since is not None and moment >= since
     return True
 
@@ -108,6 +128,7 @@ class StationProxy(QSortFilterProxyModel):
         super().__init__(parent)
         self.field_filters: dict[str, dict] = {}
         self._kinds: dict[str, str] = {}
+        self._compiled: dict[str, dict] = {}
 
     def set_field_filters(self, filters: dict[str, dict]) -> None:
         model = self.sourceModel()
@@ -116,6 +137,7 @@ class StationProxy(QSortFilterProxyModel):
         if wanted == self.field_filters and kinds == self._kinds:
             return
         self.field_filters, self._kinds = wanted, kinds
+        self._compiled = {f: compile_spec(kinds.get(f, "text"), s) for f, s in wanted.items()}
         self.invalidateFilter()
 
     def filterAcceptsRow(self, row: int, parent) -> bool:
@@ -123,4 +145,4 @@ class StationProxy(QSortFilterProxyModel):
             return False
         model = self.sourceModel()
         return all(matches(model, row, field, self._kinds.get(field, "text"), spec)
-                   for field, spec in self.field_filters.items())
+                   for field, spec in self._compiled.items())
