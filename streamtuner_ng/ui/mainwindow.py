@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
     INTERNAL_CHANNELS = ("bookmarks", "local")
     _CACHE_STALE_S = 6 * 3600           # disk cache older than this -> freshen in the background
     _REFRESH_EVERY_MS = 20 * 60 * 1000  # periodic background refresh of the current category
+    _STREAM_RETRY_DELAYS_MS = (2000, 4000, 8000, 15000, 30000)   # tries after a stream drops, about a minute in all
 
     def __init__(self, config, host, player):
         super().__init__()
@@ -62,6 +63,11 @@ class MainWindow(QMainWindow):
         self._nav = NavHistory()      # lists opened, for Back / Forward (mouse side buttons, Alt+Left/Right)
         self._last_row = None         # the last station that started playing: Play with nothing selected resumes it
         self._sort_owner = None       # the service whose table sort is on screen (a click on a category keeps it)
+        self._refresh_due = False     # the 20-minute refresh came due while nobody was looking: do it on return
+        self._stream_retries = 0      # automatic tries after a dropped stream (reset once it plays steadily)
+        self._retry_token = 0         # a pending retry belongs to the newest token only
+        self._retry_pending = False
+        self._retrying = False
         self._np_full = ""
         self._np_meta = ""            # bitrate/codec suffix shown right after the title
         self._play_gen = 0
@@ -2012,6 +2018,10 @@ class MainWindow(QMainWindow):
         if row is None:
             self._play_refused("Unsupported station URL")
             return
+        if not self._retrying:                               # the user chose a station: any waiting retry is theirs no more
+            self._retry_token += 1
+            self._retry_pending = False
+            self._stream_retries = 0
         self._play_cancel.set()
         self._play_cancel = threading.Event()
         cancel = self._play_cancel
@@ -2124,7 +2134,43 @@ class MainWindow(QMainWindow):
                 wdg.blockSignals(False)
         self.statusBar().showMessage("Loudness normalization " + ("on" if on else "off"))
 
+    def _retry_dropped_stream(self) -> bool:
+        """A network stream ended by itself (a blip, a sleep and resume): try the same station again after
+        2, 4, 8, 15 and 30 seconds before giving up. True while a try is under way or waiting; False when it
+        is not worth trying (a local file that ended, or the tries are used up)."""
+        if self._retry_pending:
+            return True
+        url = str((self._playing_row or {}).get("url", ""))
+        if not url.startswith(("http://", "https://", "icy://", "mmsh://")):
+            return False
+        if self._stream_retries >= len(self._STREAM_RETRY_DELAYS_MS):
+            self._stream_retries = 0
+            return False
+        delay = self._STREAM_RETRY_DELAYS_MS[self._stream_retries]
+        self._stream_retries += 1
+        self._retry_pending = True
+        self._retry_token += 1
+        token, row = self._retry_token, self._playing_row
+        self.statusBar().showMessage(
+            f"Stream interrupted — trying again ({self._stream_retries} of {len(self._STREAM_RETRY_DELAYS_MS)})…", 6000)
+        self.np_label.setText(f"Reconnecting — {self._np_full}")
+        QTimer.singleShot(delay, lambda: self._retry_play(row, token))
+        return True
+
+    def _retry_play(self, row, token) -> None:
+        self._retry_pending = False
+        if token != self._retry_token or self._closing or not self.btn_play.isChecked() or row is None:
+            return                                           # stopped, or another station started meanwhile
+        self._retrying = True
+        try:
+            self._play_row(row)
+        finally:
+            self._retrying = False
+
     def _stop(self, *_a) -> None:
+        self._retry_token += 1                               # a try that is waiting must not start the sound later
+        self._retry_pending = False
+        self._stream_retries = 0
         self._play_gen += 1
         self._play_cancel.set()
         self._pending_play = False
@@ -2585,15 +2631,21 @@ class MainWindow(QMainWindow):
         if done is not None:
             done(True)
         rows = res.data or []
+        unchanged = self._cache.get(key) == rows      # the same stations again: leave the list, its selection and its live songs alone
         self._cache[key] = rows
         self._save_catalog(cid, cat, rows)
         self._update_cache_label()
         if (self.current_channel, self.current_category) == key and key != self._loading_key and not self._view_search:
-            self._replace_rows(rows, validated=True)
-            self._list_message(f"{cat}: refreshed ({len(rows):,} stations)")
+            if not unchanged:
+                self._replace_rows(rows, validated=True)
+            self._list_message(f"{cat}: {'up to date' if unchanged else 'refreshed'} ({len(rows):,} stations)")
 
 
     def _periodic_refresh(self) -> None:
+        if not self.isVisible() or self.isMinimized():
+            self._refresh_due = True              # hidden in the tray or minimised: nobody sees it, so wait until they return
+            return
+        self._refresh_due = False
         cid, cat = self.current_channel, self.current_category
         derived = cat == getattr(self.host.channels.get(cid), "listeners_category", "")
         if cid and cat and not self._view_search and not derived:
@@ -2692,16 +2744,20 @@ class MainWindow(QMainWindow):
                         self.np_label.setText(f"Connecting — {self._np_full}")
                 bits = [b for b in (self._np_meta.strip(), f"buffer {buf}%" if buf is not None else "") if b]
                 self._stream_label.setText("▶ " + " · ".join(bits) if bits else "▶")
+                if self._stream_retries and time.monotonic() - self._play_started_at > 20:
+                    self._stream_retries = 0                  # it has played steadily: the next drop starts afresh
             else:
                 self._stream_label.setText("" if self.player.available else "⚠ no audio engine")
                 if (not self._pending_play and self.btn_play.isChecked() and self._playing_row
                         and time.monotonic() - self._play_started_at > 1):
                     failure = getattr(self.player, 'playback_error', '')
-                    self._stop()
-                    if isinstance(failure, str) and failure:
-                        self._status_error("Stream unavailable: " + self.config.redact(failure))
-                    else:
-                        self.statusBar().showMessage("Playback ended")
+                    if not self._retry_dropped_stream():
+                        self._stop()
+                        if isinstance(failure, str) and failure:
+                            self._status_error("Stream unavailable: " + self.config.redact(failure)
+                                               + " — press Play to try again")
+                        else:
+                            self.statusBar().showMessage("Playback ended")
         except Exception:  # noqa: BLE001 — the 1 s status poll must never take down the app
             pass
 
@@ -3492,6 +3548,8 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if hasattr(self, "_vu_timer"):
             self._sync_visualizer()
+        if getattr(self, "_refresh_due", False):
+            QTimer.singleShot(1500, self._periodic_refresh)     # the refresh that came due while hidden
 
     def hideEvent(self, event):
         super().hideEvent(event)
@@ -3502,6 +3560,8 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if hasattr(self, "_vu_timer"):
             self._sync_visualizer()
+            if getattr(self, "_refresh_due", False) and not self.isMinimized() and self.isVisible():
+                QTimer.singleShot(1500, self._periodic_refresh)
 
     def closeEvent(self, e):
         if self._closing:
