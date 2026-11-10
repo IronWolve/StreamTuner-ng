@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self._search_timer = QTimer(self)     # debounce search (smooth on huge lists)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._apply_filter)
+        self._icon_dirty: set = set()         # favicon addresses / station URLs whose icon arrived since the last repaint
         self._icon_refresh = QTimer(self)     # coalesce lazy station-favicon repaints into one
         self._icon_refresh.setSingleShot(True)
         self._icon_refresh.timeout.connect(self._flush_icon_refresh)
@@ -1126,6 +1127,7 @@ class MainWindow(QMainWindow):
                 self._station_icons[url] = ic
                 self._trim_icons(self._station_icons)
                 self._icon_retry_at.pop(("station", url), None)
+                self._icon_dirty.add(url)
                 self._icon_refresh.start(150)        # debounce: one repaint per burst of loads
 
                 return
@@ -1155,13 +1157,15 @@ class MainWindow(QMainWindow):
                 self._derived_icons[url] = ic
                 self._trim_icons(self._derived_icons)
                 self._icon_retry_at.pop(("derived", url), None)
+                self._icon_dirty.add(url)
                 self._icon_refresh.start(150)        # debounce: one repaint per burst
                 return
         self._derived_icons[url] = "miss"
         self._icon_failed("derived", url, path)
 
     def _flush_icon_refresh(self) -> None:
-        self.model.refresh_icons()
+        keys, self._icon_dirty = self._icon_dirty, set()
+        self.model.refresh_icons(keys)            # only the rows whose icon arrived
 
     # ---- loading flow (all async through the airlock) ----
     def _on_channel(self, cur, _prev) -> None:
@@ -1954,6 +1958,7 @@ class MainWindow(QMainWindow):
             fav = row.get("favicon", "")
             if fav and not pm.isNull():                       # refresh the list row's icon too
                 self._station_icons[fav] = QIcon(path)
+                self._icon_dirty.add(fav)
                 self._icon_refresh.start(50)
             if self._playing_row and self._playing_row.get("url") == row.get("url"):
                 self._art_token = self._playing_row.get("url", "")

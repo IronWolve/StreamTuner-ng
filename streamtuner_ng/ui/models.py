@@ -55,10 +55,37 @@ class StationModel(QAbstractTableModel):
         self.fav_provider = None     # callable(url) -> bool          (is favourited)
         self.source_provider = None  # callable(row) -> str           (service the row belongs to)
 
-    def refresh_icons(self) -> None:
-        if self._rows:
-            self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, 0),
-                                  [Qt.DecorationRole, Qt.DisplayRole])
+    ICON_ROLES = [Qt.DecorationRole, Qt.DisplayRole]
+    ICON_FULL_AT = 400          # this many changed rows: announce the whole column, it is as cheap
+
+    def refresh_icons(self, keys=None) -> None:
+        """Repaint station icons. With ``keys`` (favicon addresses and station URLs whose icon just arrived) only
+        the rows that use them are announced: a change over every row makes a proxy sorted by the title column
+        re-sort the whole list (about 180 ms for 10,000 rows), once per burst of arriving icons."""
+        if not self._rows:
+            return
+        if keys is None:
+            self._emit_icon_rows(0, len(self._rows) - 1)
+            return
+        keys = set(keys)
+        if not keys:
+            return
+        changed = sorted({i for i, row in enumerate(self._rows) if row.get("favicon") in keys or row.get("url") in keys})
+        if not changed:
+            return
+        if len(changed) >= self.ICON_FULL_AT:
+            self._emit_icon_rows(0, len(self._rows) - 1)
+            return
+        start = previous = changed[0]
+        for i in changed[1:]:
+            if i != previous + 1:
+                self._emit_icon_rows(start, previous)
+                start = i
+            previous = i
+        self._emit_icon_rows(start, previous)
+
+    def _emit_icon_rows(self, first: int, last: int) -> None:
+        self.dataChanged.emit(self.index(first, 0), self.index(last, 0), self.ICON_ROLES)
 
     @staticmethod
     def _search_text(row):
