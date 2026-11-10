@@ -60,20 +60,37 @@ class ExampleRadio(Channel):
 
     # Return the station rows for the selected category. make_row() needs only
     # title + url; everything else is optional. mpv plays direct URLs, .pls, .m3u.
+    #
+    # SEARCH: when `search` is set the app may pass an EMPTY or unknown `category` (searching all
+    # services does that). Search every category then, as below - looking only in `category` finds nothing.
+    # A list is expected: return [] when there is nothing (None, a dict or a number is reported as an error).
     def update_streams(self, category, search=None):
         rows = []
-        for name, url in self.STATIONS.get(category, []):
-            if search and search.lower() not in name.lower():
-                continue                     # respect the search box (has_search = True)
-            rows.append(make_row(
-                title=name,
-                url=url,
-                genre=category,
-                bitrate=128,
-                format="audio/mpeg",
-                listformat="srv",            # "srv" = a direct stream URL (no .pls/.m3u indirection)
-            ))
+        categories = list(self.STATIONS) if (search and category not in self.STATIONS) else [category]
+        for cat in categories:
+            for name, url in self.STATIONS.get(cat, []):
+                if search and search.lower() not in name.lower():
+                    continue                 # respect the search box (has_search = True)
+                rows.append(make_row(
+                    title=name,
+                    url=url,
+                    genre=cat,
+                    bitrate=128,
+                    format="audio/mpeg",
+                    listformat="srv",        # "srv" = a direct stream URL (no .pls/.m3u indirection)
+                ))
         return rows
+
+    # PAGING (only for services with thousands of stations): set `page_size = 500`, then implement
+    #     def update_streams_page(self, category, offset=0, limit=None, search=None):
+    #         ...fetch rows offset..offset+limit...
+    #         return Page(rows, has_more=len(rows) == limit, next_offset=offset + len(rows))
+    # (from streamtuner_ng.plugins.result import Page). A page past the end must be [] or a Page with no more
+    # rows: a plugin that returns the same rows for every offset is stopped after the repeat.
+    #
+    # LIMITS: a call may take 45 s (12 s to resolve a stream); two calls per service run at once; a list is cut
+    # at 100,000 rows; streamtuner_ng.net.http (get_json, get_text, post_json) refuses private/LAN addresses and
+    # reads at most 4 MB of text.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

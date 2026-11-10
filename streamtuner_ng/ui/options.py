@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+from ..plugins.result import Status
 from .dialogs import StyledDialog, info, log_viewer
 from .worker import run_cache, run_credentials, run_io
 
@@ -740,7 +741,8 @@ class OptionsDialog(StyledDialog):
         row0 = 1
         if problems:
             warn = QLabel("<b>Could not load:</b> " + "; ".join(
-                f"{escape(str(n))} — {escape(str(e))}" for n, e in problems[:6]))
+                f"{escape(str(n))} — {escape(str(e))}" for n, e in problems[:12])
+                + (f"; … and {len(problems) - 12} more (see View Log, or run with --plugins)" if len(problems) > 12 else ""))
             warn.setWordWrap(True)
             warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
             warn.setStyleSheet("color: #d9822b;")
@@ -758,6 +760,14 @@ class OptionsDialog(StyledDialog):
             dot = QLabel()
             if not is_internal:                  # internal channels are always on — no health dot
                 dot.setPixmap(theme.status_icon(self.host.health[cid].status).pixmap(14, 14))
+                health = self.host.health[cid]
+                reason = ("Switched off after repeated errors; Reload (F5) on this service switches it back on. "
+                          if health.auto_disabled else "")
+                dot.setToolTip(f"{reason}Last result: {health.status.name.lower()}"
+                               + (f" — {health.message}" if health.message else "")
+                               + ("" if health.status is not Status.DISABLED or health.auto_disabled else
+                                  "\nGrey = not asked yet since the app started (or switched off).")
+                               + "\nView Log shows the details.")
             cb = QCheckBox(ch.title)
             cb.setObjectName(f"pluginEnabled_{cid}")
             if is_internal:

@@ -111,13 +111,19 @@ class RadioBrowser(Channel):
             self._countries = found
         return self._countries
 
+    @staticmethod
+    def _pretty(tag: str) -> str:
+        """Title-case a tag for the category list without turning "80s" into "80S"."""
+        import re
+        return re.sub(r"(?<=\d)[A-Z]", lambda m: m.group(0).lower(), str(tag).title())
+
     def update_categories(self) -> list[str]:
         tags = self._get(
             "tags",
             {"order": "stationcount", "reverse": "true", "hidebroken": "true", "limit": 80},
         )
         # "Top" + "All" pinned first, then the tags A–Z with the countries beside them.
-        names = sorted({t["name"].title() for t in tags if t.get("name")})
+        names = sorted({self._pretty(t["name"]) for t in tags if t.get("name")})
         try:
             names += sorted(self._country_map(refresh=True))
         except (http.RequestCancelled, http.RequestDeadlineExceeded):

@@ -74,6 +74,8 @@ class Live365(Channel):
         """The homepage's curated set, enriched with each stream's ICY headers."""
         html = http.get_text(LISTEN, headers=_BROWSER, timeout=15)
         ids = sorted(set(_ID_RE.findall(html)))
+        if not ids:
+            raise ValueError("Live365's page no longer lists stations in the expected form (the page changed)")
         rows = [r for r in http.map_with_context(self._probe, ids, max_workers=12) if r]
         rows.sort(key=lambda r: r["title"].lower())
         return rows
@@ -84,7 +86,7 @@ class Live365(Channel):
         http.check_request_context()
         url = STREAM + sid
         try:
-            r = http.session.get(url, headers={**_BROWSER, "Icy-MetaData": "1"}, timeout=8, stream=True)
+            r = http.session.get(url, headers={**_BROWSER, "Icy-MetaData": "1"}, timeout=4, stream=True)
             h = r.headers
             r.close()
         except (http.RequestCancelled, http.RequestDeadlineExceeded):

@@ -11,6 +11,8 @@ GUI (the GUI just calls it from a QThread and reads results on the UI thread).
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import queue
 import time
@@ -26,7 +28,7 @@ AUTO_DISABLE_THRESHOLD = 3      # consecutive errors before we trip a plugin off
 LOG_KEEP = 500                    # per-plugin log entries kept in memory (viewable under Options)
 
 
-def _origin(exc: BaseException) -> str:
+def _origin(exc: BaseException, own: str | None = None) -> str:
     """Where a plugin exception came from, e.g. "myplugin.py:42 in update_streams" — the deepest
     frame outside the host and installed libraries, so authors land on their own line."""
     import os
@@ -35,9 +37,11 @@ def _origin(exc: BaseException) -> str:
         frames = traceback.extract_tb(exc.__traceback__)
     except Exception:  # noqa: BLE001
         return ""
+    own = os.path.abspath(own) if own else None
     mine = [f for f in frames if "site-packages" not in f.filename
             and os.path.basename(f.filename) != "host.py"]
-    f = (mine or frames or [None])[-1]
+    ours = [f for f in mine if own and os.path.abspath(f.filename) == own]
+    f = (ours or mine or frames or [None])[-1]
     return f"{os.path.basename(f.filename)}:{f.lineno} in {f.name}" if f else ""
 
 
@@ -205,6 +209,7 @@ class PluginHost:
     def __init__(self, config: Any = None):
         self.config = config
         self._lock = threading.RLock()
+        self._calling = threading.local()                 # the method this thread is in the middle of calling
         self._session_scope = object()
         self._active: dict[str, int] = {}
         self._active_regular: dict[str, int] = {}
@@ -226,8 +231,16 @@ class PluginHost:
     # ---- registration ----
     def register(self, channel: Channel) -> None:
         cid = channel.id
-        if not valid_id(cid) or cid in self.channels:
-            raise ValueError("Plugin ID is invalid or already registered")
+        if not valid_id(cid):
+            raise ValueError(f"Plugin id {str(cid)[:40]!r} is invalid: use letters, digits, '-' or '_' "
+                             "(up to 64 characters)")
+        if cid in self.channels:
+            first = getattr(sys.modules.get(type(self.channels[cid]).__module__), "__file__", None)
+            here = getattr(sys.modules.get(type(channel).__module__), "__file__", None)
+            raise ValueError(f"Plugin id {cid!r} is already used by "
+                             f"{os.path.basename(first) if first else 'another plugin'}"
+                             f"{' (this file: ' + os.path.basename(here) + ')' if here else ''}; "
+                             "give the plugin a different id")
         if self.config is not None:
             for option in channel.options_spec:
                 if isinstance(option, dict) and option.get("type") == "secret":
@@ -304,6 +317,7 @@ class PluginHost:
             return Result(Status.ERROR, message=f"no such plugin: {cid}")
         if not channel.test_only and not self.is_enabled(cid):
             return Result(Status.DISABLED, message="plugin is disabled")
+        self._calling.method = method
         if method not in ("update_categories", "refresh_categories", "update_streams", "refresh_streams", "update_streams_page", "resolve_url"):
             return Result(Status.ERROR, message="unsupported plugin method")
         fn = getattr(channel, method, None)
@@ -365,13 +379,20 @@ class PluginHost:
         if "exc" in box:
             exc = box["exc"]
             message = f"{type(exc).__name__}: {exc}"
-            where = _origin(exc)
+            where = _origin(exc, getattr(sys.modules.get(type(channel).__module__), "__file__", None))
             if where:
                 message += f"  [{where}]"
             message = self.config.redact(message) if self.config is not None else redact_text(message)
             return self._record(cid, Result(Status.ERROR, message=message[:2048]))
 
         data = box.get("data")
+        if method in ("update_categories", "refresh_categories", "update_streams", "refresh_streams",
+                      "update_streams_page") and not isinstance(data, (list, Page)):
+            data, problem = self._as_list(method, data)
+            if problem:
+                return self._record(cid, Result(Status.ERROR, message=problem))
+            self._log(self.health[cid], f"{method} returned a {type(box.get('data')).__name__}; "
+                                        "return a list (it was converted)")
         if method in ("update_categories", "refresh_categories"):
             if isinstance(data, list):
                 kept = [x[:256] for x in data[:MAX_ROWS] if isinstance(x, str)]
@@ -467,6 +488,20 @@ class PluginHost:
             return self._record(cid, Result(Status.EMPTY, data=data if data else [], message="no results"))
         return self._record(cid, Result(Status.OK, data=data))
 
+    @staticmethod
+    def _as_list(method: str, value: Any) -> tuple[list | None, str]:
+        """A plugin that hands back a tuple, a dict's keys or a generator instead of a list still works (and the
+        log says so); anything else (None, a dict, a number) is an error that names the method, not 'no results'."""
+        import types
+        from collections.abc import KeysView, ValuesView
+        if isinstance(value, (tuple, set, frozenset, KeysView, ValuesView, types.GeneratorType)):
+            try:
+                return list(value), ""
+            except Exception as exc:  # noqa: BLE001 — a generator may raise while it is read
+                return None, f"{method} raised {type(exc).__name__}: {exc} while its result was read"
+        expected = "a list of category names" if "categories" in method else "a list of station rows (or a Page)"
+        return None, f"{method} returned {type(value).__name__}, expected {expected}"
+
     def _release_call_slot(self, cid: str, playback: bool, background: bool = False) -> None:
         self._active[cid] -= 1
         active = self._active_playback if playback else self._active_regular
@@ -503,10 +538,14 @@ class PluginHost:
         h.status = result.status
         h.message = result.message
         if result.status in (Status.ERROR, Status.TIMEOUT):
-            h.consecutive_errors += 1
+            # A station that will not start (a dead stream, a missing key) is that station's problem, not the
+            # provider's: three of those in a row must not switch the whole provider off.
+            counts = getattr(self._calling, "method", None) != "resolve_url"
+            if counts:
+                h.consecutive_errors += 1
             h.error_count += 1
             self._log(h, result.message)
-            if h.consecutive_errors >= AUTO_DISABLE_THRESHOLD and not h.auto_disabled:
+            if counts and h.consecutive_errors >= AUTO_DISABLE_THRESHOLD and not h.auto_disabled:
                 h.auto_disabled = True
                 self.state.setdefault(cid, {})["enabled"] = False      # this run only (see _persist_state)
                 h.message = (

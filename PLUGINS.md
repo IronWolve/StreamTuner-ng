@@ -31,9 +31,12 @@ Radio/
 
 You do not need to extract or modify the AppImage. Supplied providers stay
 inside it; your plugins stay beside it. When updating or moving the app, keep
-the `plugins/` folder alongside the AppImage. A file with the same name as a
-bundled provider overrides that provider. Use a different filename for a new
-provider, and avoid spaces, hyphens or a leading underscore in plugin filenames.
+the `plugins/` folder alongside the AppImage. In the AppImage a file with the same name as a
+bundled provider overrides that provider. In an installed package (for example the Debian one) the
+bundled providers are read-only: your plugins go in the `plugins` folder inside your settings
+folder (Tools → Open Plugins Folder shows it), and a plugin that re-uses a bundled provider's `id`
+is refused with a message naming both files. Use a different filename and a different `id` for a
+new provider, and avoid spaces, hyphens or a leading underscore in plugin filenames.
 
 Copy _example.py to a filename without a leading underscore and give the class a
 unique lowercase id. Use imports such as:
@@ -113,17 +116,23 @@ is optional and defaults sensibly:
 | field | meaning |
 |---|---|
 | `title`, `url` | required — name + stream/playlist URL (pls/m3u/direct all play) |
-| `genre`, `playing` | category tag(s) · now-playing / description |
+| `genre`, `playing` | category tag(s) · what the station plays now (a song title; leave empty if unknown) |
+| `description`, `homepage` | a line about the station · its web page (adds Open Website) |
 | `bitrate`, `listeners`, `votes` | numbers (shown in their columns, sort numerically) |
 | `country`, `format` | country · MIME (e.g. `audio/mpeg`) |
 | `favicon` | artwork URL (fetched + cached at runtime, never bundled) |
-| `listformat` | `pls`/`m3u`/`srv`… (default `pls`) |
+| `listformat` | only the text of the Playlist column (`pls`/`m3u`/`srv`…); it changes nothing about playback |
 
 ## Optional features
 
-- **`has_search = True`** — then `update_streams(category, search="…")` is called for searches.
+- **`has_search = True`** — then the app calls `update_streams(category, search="…")` (or
+  `update_streams_page`) for searches. When the user searches all services, `category` is empty (or the
+  service's `all_category`): search every category then, or you will find nothing. Return `[]` when nothing matches.
 - **`page_size = 500`** — progressive loading: the UI shows the first page when it arrives, then
-  streams the rest in. Implement `update_streams_page(category, offset, limit, search)`.
+  streams the rest in. Implement `update_streams_page(category, offset, limit, search)` and return a
+  `Page(rows, has_more=…, next_offset=…)` (from `streamtuner_ng.plugins.result`). A page past the end must
+  be empty (or a `Page` with `has_more=False`); a plugin that returns the same rows for every offset is
+  stopped after the first repeated page.
 - **`needs_resolve = True`** + **`resolve_url(row)`** — if the row URL is an indirection
   that must be turned into a real stream URL at play time (e.g. a tune-in link).
 - **`local_files = True`** — your plugin serves local files (for example PLS/M3U/audio files from a
@@ -132,7 +141,8 @@ is optional and defaults sensibly:
   Without this flag only `http`, `https`, `icy` and `mmsh` stream URLs are accepted. Favorites,
   CSV and backup imports always stay network-only, and `file:` is never opened as a web link.
 - **`group = "MyNetwork"`** — render several related channels under one sidebar header.
-- **`priority`** — `"core"/"standard"/"default"` = on by default; anything else = off.
+- **`priority`** — `"core"`, `"builtin"`, `"always"`, `"default"` or `"standard"` = on by default for a
+  new user; anything else = off until the user ticks it in Options → Plugins.
 - **`options_spec = [...]`** — add your own **right-click menu options** with no UI code. The app
   renders them and saves the value to config under `key`; your plugin just reads it back with
   `self.config.get(key, default)`. Two kinds: a **`choice`** submenu (radio, lit-checked — e.g. a
@@ -210,9 +220,21 @@ publishing data after a fetch so an older request cannot undo a refresh.
 ## Crash isolation
 
 Every plugin call runs behind an airlock: if your plugin throws, hangs, or returns junk,
-it gets a red/amber status dot (and auto-disables after repeated failures) — the rest of
-the app keeps working. A plugin file that won't even import is skipped and reported, not
+it gets a red/amber status dot (and is switched off for the rest of that run after 3 failed list
+or timeout calls in a row — a station that will not start does not count; Reload on that service
+switches it back on, and it is on again at the next start) — the rest of the app keeps working.
+A method that returns the wrong kind of thing (`None`, a dict, a number instead of a list) is
+reported by name in the log ("update_streams returned NoneType, expected a list…"); a tuple or a
+dict's keys are accepted and logged. A plugin file that won't even import is skipped and reported, not
 fatal. So experiment freely.
 
-Helpers you can import: `from streamtuner_ng.net import http` (`http.get_json`,
-`http.get_text`, `http.post_json`).
+Helpers you can import: `from streamtuner_ng.net import http`: `http.get_json(url, params, timeout=…)`,
+`http.get_text(url, headers=…)`, `http.get_bytes`, `http.post_json(url, form_dict)` (a form post, not a JSON
+body), `http.map_with_context(fn, items, max_workers)` (the same call for many items side by side, results in
+order) and `http.check_request_context()` (call it in your own loops so a cancelled view stops you).
+
+Limits to know: a list call has 45 seconds and `resolve_url` 12; two calls per service run at once and a
+call that never returns keeps its slot until the app restarts; a list is cut at 100,000 rows; text responses
+are limited to 4 MB; the helpers only reach public internet addresses (not a server on your LAN), and the
+default request timeout is 8 seconds. `streamtuner-ng --plugins --probe ID` asks your plugin the way the app
+does (same 45 seconds, through paging) and says when no stations come back.

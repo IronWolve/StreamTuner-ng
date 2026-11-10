@@ -41,17 +41,21 @@ def list_plugins(probe: list[str] | None = None) -> int:
     state = ('the same folder' if shared else 'exists' if existed else
              'did not exist; created now' if mine.is_dir() else 'could not be created')
     print(f'  your folder     {mine}  ({state})')
-    seen: set[str] = set()
+    seen: dict[str, Path] = {}
     rows = []
+    duplicates = []
     for cls in [*classes, *user_classes]:
         cid = getattr(cls, 'id', '') or cls.__name__
-        if cls.__module__.endswith(('.bookmarks', '.local')) or cid in seen:
+        if cls.__module__.endswith(('.bookmarks', '.local')):
             continue
-        seen.add(cid)
         try:
             source = Path(inspect.getfile(cls)).resolve()
         except (TypeError, OSError):
             source = Path('?')
+        if cid in seen:
+            duplicates.append((cid, source, seen[cid]))        # the app loads only the first one
+            continue
+        seen[cid] = source
         yours = _Profile.dir.resolve() / 'plugins' in source.parents or (not shared and mine.resolve() in source.parents)
         flags = ('  [yours]' if yours else '') + ('  [local files]' if getattr(cls, 'local_files', False) else '')
         rows.append((cid, getattr(cls, 'title', ''), source, flags))
@@ -59,8 +63,10 @@ def list_plugins(probe: list[str] | None = None) -> int:
         print(f'  {cid:<16} {title:<28} {source.name}{flags}')
     for name, error in errors:
         print(f'  FAILED  {name}: {error}')
-    print(f'{len(rows)} plugins load, {len(errors)} failed')
-    failed = len(errors)
+    for cid, source, first in duplicates:
+        print(f'  FAILED  {source.name}: id {cid!r} is already used by {first.name}; this file is not loaded')
+    print(f'{len(rows)} plugins load, {len(errors) + len(duplicates)} failed')
+    failed = len(errors) + len(duplicates)
     if probe is not None:
         failed += _probe(probe, [*classes, *user_classes], rows)
     return 1 if failed else 0
@@ -94,17 +100,21 @@ def _probe(ids: list[str], classes: list, rows: list) -> int:
                     print(f'  probe  {cid:<16} FAILED: no such plugin')
                     failures += 1
                 continue
-            cats = host.call(cid, 'update_categories')
+            cats = host.call(cid, 'update_categories', timeout=45)        # the app's own limit
             if not cats.ok or not cats.data:
                 print(f'  probe  {cid:<16} FAILED: categories: {cats.message or cats.status.name}')
                 failures += 1
                 continue
             first = list(cats.data)[0]
-            stations = host.call(cid, 'update_streams', first)
+            channel = host.channels[cid]
+            limit = getattr(channel, 'page_size', None) or 100000       # what the window asks for on the first page
+            stations = host.call(cid, 'update_streams_page', first, 0, limit, None, timeout=45)
             if not stations.ok:
                 print(f'  probe  {cid:<16} FAILED: stations of {first!r}: {stations.message or stations.status.name}')
                 failures += 1
                 continue
             note = f'  ({stations.message})' if stations.message else ''
-            print(f'  probe  {cid:<16} ok: {len(cats.data)} categories, {len(stations.data)} stations in {first!r}{note}')
+            more = '  (more pages follow)' if getattr(stations, 'has_more', False) else ''
+            warn = '  WARNING: no stations came back; check the category you return and the rows' if not stations.data else ''
+            print(f'  probe  {cid:<16} ok: {len(cats.data)} categories, {len(stations.data)} stations in {first!r}{more}{note}{warn}')
     return failures

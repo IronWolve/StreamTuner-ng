@@ -1469,6 +1469,7 @@ class MainWindow(QMainWindow):
         note = getattr(result, "message", "")
         if isinstance(note, str) and note and note != "no results" and note not in self._load_notes:
             self._load_notes.append(note)          # e.g. "2 row(s) rejected from <plugin>: …"
+        known_before = len(self._fresh_rows) if self._retain_during_load else self.model.rowCount()
         if rows:
             if self._retain_during_load:
                 for row in rows:
@@ -1489,6 +1490,9 @@ class MainWindow(QMainWindow):
             self._apply_column_visibility()
         more, next_offset = self._page_continuation(ch, cat, offset, result)
         loaded_count = len(self._fresh_rows) if self._retain_during_load else self.model.rowCount()
+        if more and offset and rows and loaded_count == known_before and loaded_count < self.ALL_LIMIT:
+            more = False                                  # a page of rows that were all listed already: the service ignores the
+            self._load_notes.append("Paging stopped: a page repeated stations already listed")  # offset, so end here
         if more and loaded_count < self.ALL_LIMIT:
             self._list_message(f"Refreshing: {loaded_count:,} stations received; showing saved stations"
                                if self._retain_during_load else f"Loaded {loaded_count:,} stations… loading more")

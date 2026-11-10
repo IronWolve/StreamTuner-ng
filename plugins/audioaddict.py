@@ -64,8 +64,21 @@ class AudioAddict(Channel):
         return [label for label, _net, _domain in NETWORKS]
 
     def update_streams(self, category: str, search: str | None = None) -> list[dict]:
-        if category not in _BY_LABEL:
+        if category in _BY_LABEL:
+            return self._network_rows(category, search)
+        if not search:
             return []
+        # A search from "all services" names no network: look through every network, side by side.
+        found: list[dict] = []
+        seen: set[str] = set()
+        for rows in http.map_with_context(lambda label: self._network_rows(label, search), list(_BY_LABEL), 6):
+            for row in rows:
+                if row["url"] not in seen:
+                    seen.add(row["url"])
+                    found.append(row)
+        return found
+
+    def _network_rows(self, category: str, search: str | None) -> list[dict]:
         net, domain = _BY_LABEL[category]
         data = http.get_json(API.format(net=net), timeout=20)
         rows = []

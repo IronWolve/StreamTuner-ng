@@ -236,12 +236,25 @@ class ExampleRadio(Channel):
 '''
 
 
+def _template_text() -> str:
+    """The example shipped with the app (the full one, with the debugging and local-files notes); the short
+    built-in copy only when that file is not installed."""
+    try:
+        for folder in plugin_directories():
+            shipped = folder / "_example.py"
+            if shipped.is_file() and not shipped.is_symlink() and shipped.stat().st_size < 65536:
+                return shipped.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        pass
+    return _TEMPLATE
+
+
 def _ensure_template(folder: Path) -> None:
     """Create the example only when absent; never replace local edits."""
     try:
         target = folder / "_example.py"
         if not target.exists() and not target.is_symlink():
-            target.write_text(_TEMPLATE, encoding="utf-8")
+            target.write_text(_template_text(), encoding="utf-8")
     except Exception:  # noqa: BLE001 — a read-only plugins dir must never crash startup
         pass
 

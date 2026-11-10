@@ -32,6 +32,10 @@ class Jamendo(Channel):
         data = http.get_json(f"{API}/radios/",
                              {"client_id": CID, "format": "json", "limit": "200"}, timeout=20)
         radios = data.get("results", []) if isinstance(data, dict) else []
+        head = data.get("headers") if isinstance(data, dict) else None
+        if isinstance(head, dict) and str(head.get("status", "success")).lower() not in ("success", "ok"):
+            # Jamendo answers HTTP 200 with a failure header (bad or blocked client id, rate limit): say so
+            raise ValueError("Jamendo refused the request: " + str(head.get("error_message") or head.get("code") or "failed")[:120])
 
         def stream_of(rd):
             http.check_request_context()
@@ -62,5 +66,7 @@ class Jamendo(Channel):
                 format="audio/mpeg",
                 listformat="url",
             ))
+        if radios and not rows and not search:
+            raise ValueError("Jamendo listed radios but none of their streams could be looked up")
         rows.sort(key=lambda r: r["title"].lower())
         return rows

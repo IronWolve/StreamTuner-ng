@@ -553,7 +553,9 @@ def _read(method, url, *, timeout=DEFAULT_TIMEOUT, max_bytes=MAX_BYTES, **kwargs
     except (RequestCancelled, RequestDeadlineExceeded):
         raise
     except requests.RequestException as exc:
-        raise requests.RequestException(f'{type(exc).__name__} fetching {redact_url(url)}') from None
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        detail = f' (HTTP {status})' if isinstance(status, int) else ''
+        raise requests.RequestException(f'{type(exc).__name__}{detail} fetching {redact_url(url)}') from None
     finally:
         response.close()
 
