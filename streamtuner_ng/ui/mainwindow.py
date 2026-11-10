@@ -60,6 +60,8 @@ class MainWindow(QMainWindow):
         self.current_channel = ""
         self.current_category = ""
         self._nav = NavHistory()      # lists opened, for Back / Forward (mouse side buttons, Alt+Left/Right)
+        self._last_row = None         # the last station that started playing: Play with nothing selected resumes it
+        self._sort_owner = None       # the service whose table sort is on screen (a click on a category keeps it)
         self._np_full = ""
         self._np_meta = ""            # bitrate/codec suffix shown right after the title
         self._play_gen = 0
@@ -379,6 +381,9 @@ class MainWindow(QMainWindow):
         key = ev.key()
         if key in (Qt.Key_Tab, Qt.Key_Backtab) and not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
             self._step_pane(-1 if key == Qt.Key_Backtab or ev.modifiers() & Qt.ShiftModifier else 1)
+            return True
+        if obj is self.table and key in (Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers():
+            self._play_selected()                            # Enter in the station list plays, like a double-click
             return True
         if obj is self.channels or obj is self.categories:
             nxt = self.categories if obj is self.channels else self.table
@@ -1178,6 +1183,7 @@ class MainWindow(QMainWindow):
         self._loading_key = None
         self.current_channel = cur.data(Qt.UserRole)
         self.current_category = ""
+        self._sort_owner = None
         if self._nav.target and self._nav.target[0] != self.current_channel:
             self._nav.target = None
         self._view_search = False
@@ -1297,7 +1303,9 @@ class MainWindow(QMainWindow):
         self.current_category = cur.text()
         self._nav.visit(self.current_channel, self.current_category)
         self._nav_update()
-        self._apply_default_sort()
+        if self._sort_owner != self.current_channel:      # a new service starts with its default sort; the
+            self._apply_default_sort()                    # categories of one service keep the sort the user chose
+            self._sort_owner = self.current_channel
         cid, cat = self.current_channel, self.current_category
         self._load_gen += 1
         gen = self._load_gen
@@ -1968,9 +1976,31 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"No broadcaster logo found for {title}")
 
     def _play_selected(self, *_a) -> None:
-        row = self._selected_row()
+        row = self._selected_row() or self._last_row
         if row:
             self._play_row(row)
+            return
+        self.btn_play.setChecked(bool(self.player.is_playing))      # nothing started: the button must not say it did
+        self.statusBar().showMessage("Select a station to play", 4000)
+
+    def _play_refused(self, message: str) -> None:
+        """A station that cannot be played: say so, and make the button, the label and the pending flag
+        show that nothing is playing (they were set the moment Play was pressed)."""
+        self._pending_play = False
+        self._status_error(message)
+        self.btn_play.setChecked(bool(self.player.is_playing))
+        self.np_label.setText(self._np_full if self.player.is_playing else "Can't play this station")
+
+    def _space_pressed(self) -> None:
+        """Space: play or pause as before, except that with another station selected than the one playing,
+        and the list focused, it switches to the selected one (one press, not stop and then play)."""
+        row = self._selected_row()
+        playing = self._playing_row or {}
+        if (row and self.btn_play.isChecked() and playing.get("url") and row.get("url") != playing.get("url")
+                and self.table.hasFocus()):
+            self._play_row(row)
+        else:
+            self._toggle_play()
 
     def _play_row(self, row) -> None:
         if isinstance(row, dict):
@@ -1980,7 +2010,7 @@ class MainWindow(QMainWindow):
             local = False
         row = station_row(row, local=local)
         if row is None:
-            self._status_error("Unsupported station URL")
+            self._play_refused("Unsupported station URL")
             return
         self._play_cancel.set()
         self._play_cancel = threading.Event()
@@ -2021,7 +2051,7 @@ class MainWindow(QMainWindow):
         local = bool(getattr(origin, "local_files", False))   # plugin opted in to file:// stations
         row = station_row(row, local=local)
         if row is None:
-            self._status_error("Unsupported or invalid station URL")
+            self._play_refused("Unsupported or invalid station URL")
             return
         if resolved is not None:
             if not isinstance(resolved, Result) or not resolved.ok or not isinstance(resolved.data, dict):
@@ -2033,7 +2063,7 @@ class MainWindow(QMainWindow):
         else:
             url = row["url"]
         if not valid_url(url, local=local):
-            self._status_error("This station did not resolve to a supported network stream")
+            self._play_refused("This station did not resolve to a supported network stream")
             return
         self.player.preroll_secs = int(self.config.get("stream_preroll_secs", 0) or 0)
         if not (self.player.play(url, local=True) if local else self.player.play(url)):
@@ -2047,6 +2077,7 @@ class MainWindow(QMainWindow):
         self._np_meta = ""
         self._elide_np()
         self._playing_row = row
+        self._last_row = row
         self._update_art()
         self.btn_play.setChecked(True)
         self.act_play.setEnabled(True)
@@ -2580,7 +2611,7 @@ class MainWindow(QMainWindow):
 
         def sc(seq, fn) -> None:
             QShortcut(QKeySequence(seq), self).activated.connect(fn)
-        sc("Space", self._toggle_play)                       # play / pause (search box keeps its space)
+        sc("Space", self._space_pressed)                     # play / pause (search box keeps its space)
         sc("Ctrl+P", self._toggle_play)
         sc(Qt.Key_MediaPlay, self._toggle_play)
         sc(Qt.Key_MediaTogglePlayPause, self._toggle_play)

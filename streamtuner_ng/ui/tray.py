@@ -91,7 +91,7 @@ def build_tray(window, host, player):
     np.setEnabled(False)
     tray._np_action = np                     # window updates this via _update_tray_np()
     menu.addSeparator()
-    play_action = menu.addAction("Play / Stop", window._toggle_play)
+    play_action = menu.addAction("Play / Stop", lambda: window._toggle_play())   # no "checked" argument: it would read as Stop
     stop_action = menu.addAction("Stop", window._stop)
     menu.addSeparator()
 
