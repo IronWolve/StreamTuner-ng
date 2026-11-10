@@ -58,8 +58,12 @@ def run_app() -> int:
     app.aboutToQuit.connect(player.shutdown)
 
     from .theme import app_font, load_user_themes, palette, stylesheet
-    load_user_themes(config)               # register any user themes/*.json before we apply one
+    _theme_errors = load_user_themes(config)       # register any user themes/*.json before we apply one
     _mode = config.get("theme", "dark")
+    from . import theme as _theme_module
+    _theme_notes = [f"Theme file {name} was not loaded: {reason}" for name, reason in _theme_errors[:3]]
+    if _mode not in _theme_module.THEMES:
+        _theme_notes.append(f"The saved theme \"{_mode}\" was not found, so Dark is used")
     _ffam, _fpx = app_font(config)         # app-wide font (Segoe UI default on Windows; user-settable)
     _font = app.font()
     app._streamtuner_default_font_family = _font.family()
@@ -82,6 +86,9 @@ def run_app() -> int:
     win.show()
     win._startup_timings = {"shell_seconds": time.monotonic() - started}
     win._list_message("Loading services…")
+    if _theme_notes:
+        from PySide6.QtCore import QTimer as _Timer       # said once the first lists have taken the status line
+        _Timer.singleShot(3000, lambda: win.statusBar().showMessage("  ·  ".join(_theme_notes)[:600], 30000))
     from .worker import run_io
     from PySide6.QtCore import QTimer
     from ..desktopentry import integrate_appimage

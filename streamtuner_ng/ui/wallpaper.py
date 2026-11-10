@@ -10,16 +10,18 @@ non-wallpaper themes are completely unaffected.
 
 from __future__ import annotations
 
+import time
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
 _BUILTIN_CACHE: dict = {}   # spec -> QPixmap: generate Synthwave / decode the bundled JPEGs only once
 _CUSTOM_CACHE: OrderedDict[tuple[str, int, int], QPixmap] = OrderedDict()
 _CUSTOM_CACHE_LIMIT = 2
+MAX_SIDE = 2560            # longest side kept for a user's picture: more only slows every resize
 
 # Bundled wallpaper images (in streamtuner_ng/assets/wallpapers/), keyed by their short spec name.
 _BUNDLED = {
@@ -46,6 +48,14 @@ class WallpaperWidget(QWidget):
         self._scaled: QPixmap | None = None      # cover-scaled to _scaled_size, cached so paint never re-scales
         self._scaled_size = None
         self._dim = 35
+        self._last_rescale = 0.0
+        self._settle = QTimer(self)               # after a resize stops, the quick scale is redone smoothly
+        self._settle.setSingleShot(True)
+        self._settle.timeout.connect(self._smooth_now)
+
+    def _smooth_now(self) -> None:
+        self._scaled = None
+        self.update()
 
     def set_wallpaper(self, pix: QPixmap | None, dim: int = 35) -> None:
         pix = pix if (pix is not None and not pix.isNull()) else None
@@ -73,9 +83,16 @@ class WallpaperWidget(QWidget):
             return
         size = self.size()
         if self._scaled is None or self._scaled_size != size:
-            # Smooth-scale once per size change (NOT every repaint) — cover-fit, then cache it.
-            self._scaled = self._pix.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            # Scale once per size change (NOT every repaint) — cover-fit, then cache it. While the window edge is
+            # being dragged the sizes come fast: scale quickly then, and smoothly once it has stopped.
+            now = time.monotonic()
+            dragging = self._scaled is not None and now - self._last_rescale < 0.15
+            self._scaled = self._pix.scaled(size, Qt.KeepAspectRatioByExpanding,
+                                            Qt.FastTransformation if dragging else Qt.SmoothTransformation)
             self._scaled_size = size
+            self._last_rescale = now
+            if dragging:
+                self._settle.start(150)
         scaled = self._scaled
         p = QPainter(self)
         x = (self.width() - scaled.width()) // 2     # center the oversized (cover) pixmap
@@ -166,6 +183,8 @@ def load_wallpaper(spec: str, base_dir=None) -> QPixmap | None:
                     return _CUSTOM_CACHE[key]
                 pm = QPixmap(str(resolved))
                 if not pm.isNull():
+                    if max(pm.width(), pm.height()) > MAX_SIDE:        # a 24-megapixel photo is cut down once, here
+                        pm = pm.scaled(MAX_SIDE, MAX_SIDE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     _CUSTOM_CACHE[key] = pm
                     _CUSTOM_CACHE.move_to_end(key)
                     while len(_CUSTOM_CACHE) > _CUSTOM_CACHE_LIMIT:

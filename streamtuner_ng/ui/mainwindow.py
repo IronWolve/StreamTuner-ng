@@ -2501,20 +2501,24 @@ class MainWindow(QMainWindow):
         f.setPixelSize(px)
         app.setFont(f)
         app.setPalette(theme.palette(mode))                              # keep OS dark-mode from bleeding in
-        app.setStyleSheet(theme.stylesheet(mode, translucent=bool(spec), font_family=fam, font_px=px))
+        shown = self._apply_wallpaper(spec)       # first: the panels are only see-through when an image sits behind them
+        app.setStyleSheet(theme.stylesheet(mode, translucent=shown, font_family=fam, font_px=px))
         tray = getattr(self, "_tray", None)
         if tray is not None and hasattr(tray.contextMenu(), "refresh"):
             tray.contextMenu().refresh()
-        self._apply_wallpaper(spec)
+        if spec and not shown:
+            self.statusBar().showMessage(f"Wallpaper image not found or unreadable: {spec[:120]}", 8000)
 
-    def _apply_wallpaper(self, spec: str) -> None:
+    def _apply_wallpaper(self, spec: str) -> bool:
+        """Show the wallpaper for ``spec``; True when an image really is behind the window now."""
         wd = getattr(self, "_wallpaper_widget", None)
         if wd is None:
-            return
+            return bool(spec)
         from .wallpaper import load_wallpaper
         base = theme.user_theme_dir(self.config) if (spec and spec != "synthwave") else None
         pix = load_wallpaper(spec, base) if spec else None
         wd.set_wallpaper(pix, int(self.config.get("wallpaper_dim", 35)))
+        return pix is not None
 
     def _reload_category(self, item) -> None:
         if item and item.text() != "Loading…":
