@@ -3411,11 +3411,51 @@ class MainWindow(QMainWindow):
         label = (text or "").strip() or "Stopped"
         if len(label) > 60:
             label = label[:57] + "…"
-        np = getattr(tray, "_np_action", None)
-        if np is not None:
-            np.setText(label)
         muted = " (muted)" if getattr(self, "_muted", False) else ""
         tray.setToolTip((f"StreamTuner-ng — {label}" if label != "Stopped" else "StreamTuner-ng") + muted)
+        self._refresh_tray_menu()
+
+    def _refresh_tray_menu(self) -> None:
+        """Tell the tray menu what is playing, whether it is a favourite, and whether the window is showing."""
+        tray = getattr(self, "_tray", None)
+        menu = tray.contextMenu() if tray is not None else None
+        apply_state = getattr(menu, "apply_state", None)
+        if apply_state is None:
+            return
+        from .tray import compose_header
+        row = self._playing_row
+        playing = bool(row)
+        service = ""
+        bitrate, codec = 0, ""
+        is_fav = False
+        if row:
+            channel = self.host.channels.get(self._resolve_source(dict(row)))
+            service = getattr(channel, "title", "") if channel is not None else ""
+            bitrate = row.get("bitrate") or 0
+            codec = (row.get("format") or "").replace("audio/", "")
+            try:
+                live_bitrate, live_codec = self.player.audio_format()
+            except Exception:  # noqa: BLE001
+                live_bitrate, live_codec = 0, ""
+            bitrate, codec = live_bitrate or bitrate, live_codec or codec
+            bm = self.host.channels.get("bookmarks")
+            is_fav = bool(bm and row.get("url") and bm.is_favourite(row["url"]))
+        song = clean_icy_title(self._np_full or "") if row else ""
+        if song == (row or {}).get("title"):
+            song = ""                                  # nothing announced yet: the station name is the title
+        apply_state({"playing": playing, "can_resume": bool(self._last_row), "is_fav": is_fav,
+                     "visible": bool(self.isVisible() and not self.isMinimized()),
+                     "header": compose_header(playing, song, (row or {}).get("title", ""), service, bitrate, codec)})
+
+    def _toggle_playing_favourite(self) -> None:
+        """The tray's 'Favorite this station': the station that is playing, whatever list is on screen."""
+        row = self._playing_row
+        if not row:
+            return
+        row = dict(row)
+        row.setdefault("_source", self._resolve_source(row))
+        self._toggle_favourite_row(row)
+        self._refresh_tray_menu()
 
     def _list_message(self, message):
         self._list_notice.setText(self.config.redact(message))
