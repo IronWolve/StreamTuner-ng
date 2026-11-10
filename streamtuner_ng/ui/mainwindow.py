@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import threading
+from concurrent.futures import CancelledError
 from collections import OrderedDict
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -51,6 +52,8 @@ class MainWindow(QMainWindow):
     # Favorites + Local are INTERNAL features, not directory plugins: always pinned
     # at the top of the sidebar, and kept out of the enable/disable toggle lists.
     INTERNAL_CHANNELS = ("bookmarks", "local")
+    _CATEGORIES_REUSE_S = 120            # a background refresh reuses a category list fetched this recently
+    _REFRESH_MAX_ROWS = 3000             # the 20-minute refresh leaves bigger lists to the 6-hour rule
     _CACHE_STALE_S = 6 * 3600           # disk cache older than this -> freshen in the background
     _REFRESH_EVERY_MS = 20 * 60 * 1000  # periodic background refresh of the current category
     _STREAM_RETRY_DELAYS_MS = (2000, 4000, 8000, 15000, 30000)   # tries after a stream drops, about a minute in all
@@ -1333,11 +1336,14 @@ class MainWindow(QMainWindow):
             self.model.set_rows([])
             self.statusBar().showMessage(f"Loading {cat}…")
             run_cache(lambda: self.config.cache_load(cid, cat),
-                      lambda disk: self._on_cached_rows(cid, cat, gen, disk))
+                      lambda disk: self._on_cached_rows(cid, cat, gen, disk),
+                      cancelled=self._load_cancel)      # a list passed over while arrowing down is never parsed
 
     def _on_cached_rows(self, cid, cat, gen, disk) -> None:
         if self._closing or gen != self._load_gen or cid != self.current_channel:
             return
+        if isinstance(disk, CancelledError):
+            return                                # the view moved on before this list was read
         if isinstance(disk, tuple):
             cached, age = disk
             admitted = self._cache.put((cid, cat), cached, age=age)
@@ -2584,9 +2590,15 @@ class MainWindow(QMainWindow):
             cancel = EitherEvent(cancel, also_cancel)
         ch = self.host.channels[cid]
         def refresh():
-            categories = self.host.call(cid, "refresh_categories", timeout=45, cancel_event=cancel, background=True)
+            # The category list was fetched a moment ago (Reload all, another list of this feed): do not download
+            # a whole directory again for every list; only a stale one is fetched afresh.
+            recent = time.monotonic() - self._cat_ages.get(cid, 0) < self._CATEGORIES_REUSE_S
+            categories = self.host.call(cid, "update_categories" if recent else "refresh_categories",
+                                        timeout=45, cancel_event=cancel, background=True)
             if not categories.ok:
                 return categories
+            if not recent:
+                self._cat_ages[cid] = time.monotonic()
             rows, seen, errors = [], set(), []
             offset, complete = 0, True
             while not cancel.is_set():
@@ -2650,7 +2662,9 @@ class MainWindow(QMainWindow):
         self._refresh_due = False
         cid, cat = self.current_channel, self.current_category
         derived = cat == getattr(self.host.channels.get(cid), "listeners_category", "")
-        if cid and cat and not self._view_search and not derived:
+        big = (cat == getattr(self.host.channels.get(cid), "all_category", None)
+               or self.model.rowCount() > self._REFRESH_MAX_ROWS)
+        if cid and cat and not self._view_search and not derived and not big:
             self._bg_refresh(cid, cat)
 
 

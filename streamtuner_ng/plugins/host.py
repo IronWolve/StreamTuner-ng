@@ -250,7 +250,12 @@ class PluginHost:
 
     def _persist_state(self) -> None:
         if self.config is not None:
-            self.config.set("plugin_state", self.state)
+            # A provider switched off by the crash budget stays off for this run only: a dead network, a laptop
+            # waking up or a service down for an hour must not make it vanish from the sidebar after a restart.
+            saved = {cid: ({**entry, "enabled": True} if self.health.get(cid) is not None
+                           and self.health[cid].auto_disabled else entry)
+                     for cid, entry in self.state.items()}
+            self.config.set("plugin_state", saved)
             self.config.save_settings()
 
     # ---- enable / visible (the checkbox + menu write here) ----
@@ -271,6 +276,7 @@ class PluginHost:
         else:
             if cid in self.health:
                 self.health[cid].status = Status.DISABLED
+                self.health[cid].auto_disabled = False       # switched off by hand now: that choice is saved
         self._persist_state()
 
     def set_visible(self, cid: str, on: bool) -> None:
@@ -502,8 +508,7 @@ class PluginHost:
             self._log(h, result.message)
             if h.consecutive_errors >= AUTO_DISABLE_THRESHOLD and not h.auto_disabled:
                 h.auto_disabled = True
-                self.state.setdefault(cid, {})["enabled"] = False
-                self._persist_state()
+                self.state.setdefault(cid, {})["enabled"] = False      # this run only (see _persist_state)
                 h.message = (
                     f"auto-disabled after {h.consecutive_errors} errors "
                     f"(last: {result.message})"
