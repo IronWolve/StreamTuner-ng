@@ -86,7 +86,12 @@ def run_app() -> int:
     from PySide6.QtCore import QTimer
     from ..desktopentry import integrate_appimage
     # An AppImage installs nothing by itself: give it a launcher entry and icon for this user (no-op elsewhere).
-    run_io(lambda: integrate_appimage(config, asset_path("logo.png")), lambda *_: None)
+    def _desktop_note(result):
+        text = f"{type(result).__name__}: {result}" if isinstance(result, BaseException) else str(result)
+        if text.startswith(("failed", "skipped")) or "removed" in text:
+            if sys.stderr is not None:
+                sys.stderr.write("desktop integration: " + text + "\n")     # visible from a terminal
+    run_io(lambda: integrate_appimage(config, asset_path("logo.png")), _desktop_note)
     import threading
     boot_cancel = threading.Event()
     app.aboutToQuit.connect(boot_cancel.set)

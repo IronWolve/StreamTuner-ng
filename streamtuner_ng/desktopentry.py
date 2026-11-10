@@ -37,8 +37,9 @@ THUMBNAILER_NAME = "{app_id}-appimage.thumbnailer"
 THUMBNAILER_NOTE = "# Managed by StreamTuner-ng: shows its icon on its AppImage file (desktop_integration)."
 # Reads argv[1] (the AppImage) and writes the appended icon to argv[2]; exits 1 for any AppImage without it.
 THUMBNAILER_PY = ("import sys,struct;f=open(sys.argv[1],'rb');f.seek(-12,2);t=f.read(12);"
-                  "n=struct.unpack('>I',t[:4])[0] if t[4:]==b'STNGICN1' else 0;n or sys.exit(1);"
-                  "f.seek(-12-n,2);open(sys.argv[2],'wb').write(f.read(n))")
+                  "n=struct.unpack('>I',t[:4])[0] if t[4:]==b'STNGICN1' else 0;(0<n<8388608) or sys.exit(1);"
+                  "f.seek(-12-n,2);d=f.read(n);d[:4]==bytes([137])+b'PNG' or sys.exit(1);"
+                  "open(sys.argv[2],'wb').write(d)")
 
 
 def data_home() -> Path:
@@ -254,13 +255,77 @@ def integrate(appimage: str | None, icon_source: str | os.PathLike, *, name: str
             mark_file(appimage, base / "icons" / "hicolor" / "512x512" / "apps" / f"{app_id}.png", app_id)
         if thumbs:
             install_thumbnailer(appimage, base, app_id)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:           # ValueError: a path that cannot be encoded
         return f"failed: {exc}"
     return status
 
 
+def trusted_appimage() -> str | None:
+    """The AppImage this process is really running from, or None.
+
+    ``APPIMAGE`` is inherited by every child of an AppImage (a terminal or editor that is itself one), so it
+    counts only when this executable lies inside the mount (``APPDIR``) that the same runtime set."""
+    image, mount = os.environ.get("APPIMAGE"), os.environ.get("APPDIR")
+    if not (image and mount and os.path.isabs(image) and os.path.isabs(mount) and os.path.isfile(image)):
+        return None
+    try:
+        inside = Path(sys.executable).resolve().is_relative_to(Path(mount).resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return image if inside else None
+
+
+def _entry_target(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("TryExec="):
+            return line[len("TryExec="):].strip()
+    return ""
+
+
+def tidy(app_id: str, *, appimage: str | None, enabled: bool, home: str | os.PathLike | None = None) -> str:
+    """Take back what this app installed when it would now be wrong; never touches anything of the user's own.
+
+    Removes our launcher entry, thumbnailer and icons when the setting is off, or when the app is not running
+    from an AppImage and the AppImage our entry points to is gone (a stale entry has the same name as a package's
+    launcher and would hide it)."""
+    base = Path(home) if home else data_home()
+    entry = base / "applications" / f"{app_id}.desktop"
+    try:
+        current = entry.read_text(encoding="utf-8", errors="replace") if entry.is_file() else ""
+    except OSError:
+        return "unchanged"
+    if MARKER not in current:
+        return "unchanged"
+    target = _entry_target(current)
+    stale = not enabled or (appimage is None and bool(target) and not os.path.exists(target))
+    if not stale:
+        return "unchanged"
+    removed = []
+    thumbnailer = base / "thumbnailers" / THUMBNAILER_NAME.format(app_id=app_id)
+    paths = [entry, thumbnailer] + [base / "icons" / "hicolor" / f"{s}x{s}" / "apps" / f"{app_id}.png" for s in SIZES]
+    for path in paths:
+        try:
+            if path == thumbnailer and THUMBNAILER_NOTE not in path.read_text(encoding="utf-8", errors="replace"):
+                continue                                     # a thumbnailer of the user's own
+            path.unlink()
+            removed.append(path.name)
+        except OSError:
+            continue
+    return f"removed {len(removed)} file(s)" if removed else "unchanged"
+
+
 def integrate_appimage(config, icon_source: str | os.PathLike) -> str:
-    """Called at start-up: does nothing unless the app is running from an AppImage and the setting allows it."""
+    """Called at start-up: integrates only when really running from an AppImage and the setting allows it;
+    otherwise removes what an earlier run installed if that is now stale or switched off."""
     from . import APP_ID, APP_NAME
-    return integrate(os.environ.get("APPIMAGE"), icon_source, name=APP_NAME, app_id=APP_ID,
-                     enabled=bool(config.get(SETTING, True)), mark=True, thumbs=True)
+    enabled = bool(config.get(SETTING, True))
+    image = trusted_appimage()
+    try:
+        status = integrate(image, icon_source, name=APP_NAME, app_id=APP_ID, enabled=enabled, mark=True, thumbs=True)
+        if not enabled or image is None:
+            cleaned = tidy(APP_ID, appimage=image, enabled=enabled)
+            if cleaned != "unchanged":
+                status = f"{status}; {cleaned}"
+    except Exception as exc:  # noqa: BLE001 - this must never reach start-up
+        return f"failed: {type(exc).__name__}: {exc}"
+    return status
