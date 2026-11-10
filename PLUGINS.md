@@ -44,6 +44,14 @@ unique lowercase id. Use imports such as:
 Tools → Open Plugins Folder opens the actual installation's directory, independent
 of the shell's working directory. Files beginning with an underscore are skipped.
 Malformed imports or duplicate IDs are reported without stopping other plugins.
+A plugin file that is not loaded says why in the plugins list and in `streamtuner-ng --plugins`: a
+file name that is not a valid Python name (for example `my-radio.py`; use `my_radio.py`) and a link
+are skipped, while a name starting with an underscore is skipped silently, on purpose. A plugin must
+finish loading within 15 seconds; one that does not (for example a network call at the top of the file)
+is skipped and reported, and every other service still appears. Background refreshes use at most one of
+a provider's two call slots, so your own click is never refused because of them. The plugin log also
+notes rows whose `homepage` or `favicon` is not an http or https address (the field is left empty),
+repeated station addresses that were dropped, and category names that are not text.
 Python plugins are trusted code with the user's account permissions; only install
 code you trust. The app does not install arbitrary plugin dependencies. Use the application's API or modules included in the frozen runtime (for example
 json, re, urllib.parse, concurrent.futures and requests). Extra dependencies are

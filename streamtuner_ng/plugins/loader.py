@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 import sys
+import threading
 import hashlib
 import inspect
 import os
@@ -55,8 +56,11 @@ def plugin_directories() -> tuple[Path, ...]:
 
 
 def _read_only_install(folder: Path) -> bool:
+    """The folder cannot be written: it exists read-only, or it does not exist and cannot be created."""
     try:
-        return folder.is_dir() and not os.access(folder, os.W_OK)
+        if folder.is_dir():
+            return not os.access(folder, os.W_OK)
+        return not folder.exists() and folder.parent.is_dir() and not os.access(folder.parent, os.W_OK)
     except OSError:
         return False
 
@@ -106,18 +110,58 @@ def _import_plugin(name, path=None):
         sys.dont_write_bytecode = previous
 
 
+IMPORT_DEADLINE = 15.0     # seconds a plugin file may take to import and construct before it is skipped
+
+
+def _import_bounded(name, path=None):
+    """_import_plugin with a deadline. A plugin whose top-level code blocks (a network call at import time)
+    must not keep every service, the built-in ones included, from appearing: it is abandoned on a daemon
+    thread and reported, and loading goes on with the next file."""
+    box: dict = {}
+
+    def work():
+        try:
+            box["module"] = _import_plugin(name, path)
+        except BaseException as exc:  # noqa: BLE001 - handed back to the caller
+            box["error"] = exc
+    worker = threading.Thread(target=work, name="plugin-import", daemon=True)
+    worker.start()
+    worker.join(IMPORT_DEADLINE)
+    if worker.is_alive():
+        raise TimeoutError(f"did not finish loading within {IMPORT_DEADLINE:g} s and was skipped")
+    if "error" in box:
+        raise box["error"]
+    return box["module"]
+
+
+def _skip_reason(path: Path) -> str | None:
+    """Why a plugin file is not loaded, as a sentence for its author; None when it is a candidate.
+    Files starting with an underscore are skipped on purpose and silently (the example template)."""
+    if path.name.startswith('_'):
+        return ''
+    if path.is_symlink():
+        return 'skipped: it is a link, not a regular file'
+    if not path.stem.isidentifier():
+        return ('skipped: the file name must be a valid Python name (letters, digits and underscores, '
+                'no hyphens or spaces), for example my_radio.py')
+    return None
+
+
 def load_installed_plugins(package_name) -> tuple[list[type], list[tuple[str, str]]]:
     """Scan the app's plugin directory. Each file is trusted Python code."""
     classes, errors = [], []
     candidates = {}
     for folder in plugin_directories():
         for path in sorted(folder.glob('*.py')):
-            if path.name.startswith('_') or path.is_symlink() or not path.stem.isidentifier():
+            reason = _skip_reason(path)
+            if reason is not None:
+                if reason:
+                    errors.append((path.name, reason))
                 continue
             candidates.setdefault(path.stem, path)
     for path in candidates.values():
         try:
-            module = _import_plugin(package_name + '.' + path.stem, path)
+            module = _import_bounded(package_name + '.' + path.stem, path)
             classes.extend(value for _name, value in inspect.getmembers(module, inspect.isclass)
                            if issubclass(value, Channel) and value is not Channel
                            and value.__module__ == module.__name__)
@@ -209,11 +253,14 @@ def load_user_plugins(config) -> tuple[list[type], list[tuple[str, str]]]:
     folder = config.dir / "plugins"  # preserve existing profile plugins as a legacy location
 
     for path in sorted(folder.glob("*.py")):
-        if path.name.startswith("_") or path.is_symlink() or not path.stem.isidentifier():
+        reason = _skip_reason(path)
+        if reason is not None:
+            if reason:
+                errors.append((path.name, reason))
             continue
         try:
             namespace = hashlib.sha256(str(path.parent.resolve()).encode()).hexdigest()[:12]
-            module = _import_plugin(f"st_userplugin_{namespace}_{path.stem}", path)
+            module = _import_bounded(f"st_userplugin_{namespace}_{path.stem}", path)
             for _name, obj in inspect.getmembers(module, inspect.isclass):
                 if (issubclass(obj, Channel) and obj is not Channel
                         and obj.__module__ == module.__name__):
