@@ -137,8 +137,10 @@ def run_selftest(*, network=False, gui=False, engine=False, report=None) -> int:
                 sys.argv = saved
         check('the thumbnailer code extracts the icon and refuses other AppImages',
               outcomes == [0, 1] and extracted.read_bytes() == icon_png, str(outcomes))
-        check('an AppImage can install its launcher entry and icon', made == 'created' and entry.is_file()
-              and f'Icon={APP_ID}' in entry.read_text() and icon.is_file() and icon.stat().st_size > 1000, made)
+        # AppImages exist only on Linux; elsewhere a path with backslashes is rightly refused, so only the Linux run judges this
+        check('an AppImage can install its launcher entry and icon', not sys.platform.startswith('linux')
+              or (made == 'created' and entry.is_file()
+                  and f'Icon={APP_ID}' in entry.read_text() and icon.is_file() and icon.stat().st_size > 1000), made)
         check('local and executable schemes blocked', all(not valid_url(u) for u in ('file:///private', 'javascript:bad', 'smb://host/share')))
         check('local file URLs only for opted-in plugins', valid_url('file:///music/a.pls', local=True)
               and not valid_url('file:///music/a.pls') and not valid_url('file:///music/a.pls', local=True, web=True))
