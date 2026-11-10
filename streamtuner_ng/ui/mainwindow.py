@@ -1126,7 +1126,8 @@ class MainWindow(QMainWindow):
         self._trim_icons(self._station_icons)
         epoch = self._icon_epoch
         run_io(lambda: station_favicon(self.config, url),
-               lambda path: self._on_station_favicon(url, path, epoch), cancelled=self._icon_cancel)
+               lambda path: self._on_station_favicon(url, path, epoch), cancelled=self._icon_cancel,
+               priority=1, newest_first=True)             # after other work, and the rows on screen now first
 
     def _on_station_favicon(self, url, path, epoch=None) -> None:
         if self._closing or epoch is not None and epoch != self._icon_epoch:
@@ -1302,6 +1303,7 @@ class MainWindow(QMainWindow):
         if self._closing or not cur or cur.text() == "Loading…":
             return
         self._reset_load()
+        self._cancel_pending_icons()              # icons asked for the list just left are no use now
         self._view_search = False
         self._back_button.hide()
         self._search_query = None
@@ -2215,7 +2217,7 @@ class MainWindow(QMainWindow):
             from ..favicons import derive_station_favicon_url
             url = row.get("url", "")
             run_io(lambda: derive_station_favicon_url(row),
-                   lambda favurl, u=url: self._on_derived_favicon(u, favurl))
+                   lambda favurl, u=url: self._on_derived_favicon(u, favurl), priority=1, newest_first=True)
 
     def _on_derived_favicon(self, station_url: str, favurl) -> None:
         if self._closing:

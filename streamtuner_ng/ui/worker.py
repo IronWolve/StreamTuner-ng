@@ -69,10 +69,13 @@ class _Pool:
                 self._threads.append(thread)
                 thread.start()
 
-    def submit(self, fn, delivery, priority=0, cancelled=None, key=None):
+    def submit(self, fn, delivery, priority=0, cancelled=None, key=None, newest_first=False):
         external_cancelled = cancelled
         superseded = threading.Event()
-        item = (int(priority), next(self._sequence), fn, delivery,
+        order = next(self._sequence)
+        # Equal priorities run oldest first; ``newest_first`` reverses that for jobs whose answer goes stale
+        # (station icons while scrolling: the rows on screen now matter more than the ones scrolled away).
+        item = (int(priority), -order if newest_first else order, fn, delivery,
                 superseded, external_cancelled, key)
         replaced = None
         admitted = False
@@ -143,14 +146,14 @@ _io_threads = 4
 
 
 def run_async(fn: Callable, on_done: Callable, pool=None, priority: int = 0,
-              cancelled: threading.Event | None = None) -> None:
+              cancelled: threading.Event | None = None, newest_first: bool = False) -> None:
     """Queue work; lower numeric priority is dispatched first."""
     global _default_pool
     if pool is None:
         if _default_pool is None:
             _default_pool = _Pool(8, 'work')
         pool = _default_pool
-    pool.submit(fn, _Delivery(on_done), priority=priority, cancelled=cancelled)
+    pool.submit(fn, _Delivery(on_done), priority=priority, cancelled=cancelled, newest_first=newest_first)
 
 
 def run_playback(fn: Callable, on_done: Callable, cancelled: threading.Event | None = None) -> None:
@@ -161,11 +164,12 @@ def run_playback(fn: Callable, on_done: Callable, cancelled: threading.Event | N
     _playback_pool.submit(fn, _Delivery(on_done), priority=0, cancelled=cancelled)
 
 
-def run_io(fn: Callable, on_done: Callable, cancelled: threading.Event | None = None) -> None:
+def run_io(fn: Callable, on_done: Callable, cancelled: threading.Event | None = None,
+           priority: int = 0, newest_first: bool = False) -> None:
     global _io_pool
     if _io_pool is None:
         _io_pool = _Pool(_io_threads, 'io')
-    run_async(fn, on_done, pool=_io_pool, cancelled=cancelled)
+    run_async(fn, on_done, pool=_io_pool, cancelled=cancelled, priority=priority, newest_first=newest_first)
 
 
 def run_cache(fn: Callable, on_done: Callable, key=None,
