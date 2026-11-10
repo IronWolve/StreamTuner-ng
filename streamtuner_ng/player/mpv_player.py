@@ -54,9 +54,11 @@ class Player:
         self._dll_handles = []
         self._volume = 70
         self._current = ""
+        self.PREROLL_GRACE = 10               # extra seconds a pre-roll may take before the sound starts anyway
         self.preroll_secs = 0                 # Options -> Cache & Data -> Stream buffer; 0 starts at once
         self._preroll_gen = 0
         self._pre_paused = False
+        self._preroll_lock = threading.RLock()   # the generation check, play, stop and the unpause happen together
         self._entry_ids = set()
         self._end_errors = {}
         self._event_lock = threading.Lock()
@@ -167,14 +169,17 @@ class Player:
             return False
         try:
             self.error = ""
-            self._preroll_gen += 1
-            wait = max(0, min(30, int(self.preroll_secs or 0)))
-            if wait or self._pre_paused:
-                self._mpv.pause = bool(wait)             # hold the sound until the pre-roll is collected
-                self._pre_paused = bool(wait)
-            self._mpv.play(url)
+            with self._preroll_lock:
+                self._preroll_gen += 1
+                gen = self._preroll_gen
+                wait = max(0, min(30, int(self.preroll_secs or 0)))
+                self._set_read_ahead(max(10, wait + 5))   # a stream buffer longer than mpv's 10 s cushion must be collectable
+                if wait or self._pre_paused:
+                    self._mpv.pause = bool(wait)             # hold the sound until the pre-roll is collected
+                    self._pre_paused = bool(wait)
+                self._mpv.play(url)
             if wait:
-                threading.Thread(target=self._release_after, args=(self._preroll_gen, wait), daemon=True,
+                threading.Thread(target=self._release_after, args=(gen, wait), daemon=True,
                                  name="stream-preroll").start()
             self._current = url
             self._entry_ids = {entry['id'] for entry in (self._mpv.playlist or []) if 'id' in entry}
@@ -183,9 +188,18 @@ class Player:
             self.error = redact_text(exc)
             return False
 
+    def _set_read_ahead(self, seconds: int) -> None:
+        """How far ahead the player reads and caches. Its own 10 s cushion could never hold a longer stream buffer,
+        so a 30 s setting would wait out the whole deadline; a build without one of the options goes without."""
+        for name in ("demuxer_readahead_secs", "cache_secs"):
+            try:
+                setattr(self._mpv, name, seconds)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _release_after(self, gen: int, wait: int) -> None:
         """Start the sound once ``wait`` seconds of the station are collected (never longer than wait + 10 s)."""
-        deadline = time.monotonic() + wait + 10
+        deadline = time.monotonic() + wait + self.PREROLL_GRACE
         while gen == self._preroll_gen and time.monotonic() < deadline:
             try:
                 if float(self._mpv.demuxer_cache_duration or 0) >= wait:
@@ -193,12 +207,13 @@ class Player:
             except Exception:  # noqa: BLE001 — property not there yet while the stream opens
                 pass
             time.sleep(0.25)
-        if gen == self._preroll_gen and self._mpv is not None:
-            try:
-                self._mpv.pause = False
-            except Exception:  # noqa: BLE001
-                pass
-            self._pre_paused = False
+        with self._preroll_lock:                  # a station started meanwhile must not be unpaused by this old one
+            if gen == self._preroll_gen and self._mpv is not None:
+                try:
+                    self._mpv.pause = False
+                except Exception:  # noqa: BLE001
+                    pass
+                self._pre_paused = False
 
     @property
     def playback_error(self) -> str:
@@ -216,15 +231,16 @@ class Player:
 
     def stop(self) -> None:
         self._current = ""
-        self._preroll_gen += 1                    # a pre-roll still collecting must not start the sound later
-        if self.available:
-            try:
-                self._mpv.stop()
-                if self._pre_paused:
-                    self._mpv.pause = False
-                    self._pre_paused = False
-            except Exception:  # noqa: BLE001
-                pass
+        with self._preroll_lock:
+            self._preroll_gen += 1                # a pre-roll still collecting must not start the sound later
+            if self.available:
+                try:
+                    self._mpv.stop()
+                    if self._pre_paused:
+                        self._mpv.pause = False
+                        self._pre_paused = False
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ---- audio filter chain (normalize / EQ / the VU meter all share it) ----
     def _apply_filters(self) -> None:
