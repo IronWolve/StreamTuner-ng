@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
 
 # selectable tray icons: key -> (emoji, label). The note is the default.
@@ -46,41 +46,116 @@ def tray_icon(config) -> QIcon:
     return emoji_icon(emoji)
 
 
-def _menu_icon(name: str, color: str, ratio: float) -> QIcon:
-    """Draw small colored controls sharply at the menu's screen pixel density."""
-    pixmap = QPixmap(round(16 * ratio), round(16 * ratio))
+def _star(cx: float, cy: float, r: float) -> QPolygonF:
+    import math
+    points = []
+    for i in range(10):
+        radius = r if i % 2 == 0 else r * 0.46
+        angle = -math.pi / 2 + i * math.pi / 5
+        points.append(QPointF(cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    return QPolygonF(points)
+
+
+def _menu_icon(name: str, color: str, ratio: float, size: int = 16) -> QIcon:
+    """Thin outline icons (drawn here, in a 24-unit grid with round ends) at the menu's screen pixel density."""
+    pixmap = QPixmap(round(size * ratio), round(size * ratio))
     pixmap.setDevicePixelRatio(ratio)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    ink = QColor(color)
-    painter.setPen(QPen(ink, 1.5))
+    painter.scale(size / 24, size / 24)
+    pen = QPen(QColor(color), 2.0)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    path = QPainterPath()
+    speaker = QPolygonF([QPointF(x, y) for x, y in ((3.5, 9.5), (7, 9.5), (11.5, 5.5), (11.5, 18.5), (7, 14.5), (3.5, 14.5))])
     if name == "play":
-        painter.setBrush(ink)
-        painter.drawPolygon(QPolygonF([QPointF(5, 3), QPointF(13, 8), QPointF(5, 13)]))
+        path.addPolygon(QPolygonF([QPointF(7, 4.5), QPointF(7, 19.5), QPointF(19.5, 12)]))
+        path.closeSubpath()
     elif name == "stop":
-        painter.setBrush(ink)
-        painter.drawRoundedRect(4, 4, 8, 8, 1, 1)
+        path.addRoundedRect(QRectF(6, 6, 12, 12), 2, 2)
     elif name == "favorite":
-        painter.setBrush(ink)
-        painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in (
-            (8, 2), (10, 6), (14, 6.5), (11, 9.5), (12, 14),
-            (8, 12), (4, 14), (5, 9.5), (2, 6.5), (6, 6))]))
+        path.addPolygon(_star(12, 12.6, 9.2))
+        path.closeSubpath()
+    elif name == "favorites":
+        for cx, cy in ((12, 7), (6.6, 16.4), (17.4, 16.4)):
+            path.addPolygon(_star(cx, cy, 4.4))
+            path.closeSubpath()
     elif name == "window":
-        painter.drawRoundedRect(2, 3, 12, 10, 1, 1)
-        painter.drawLine(2, 6, 14, 6)
-    elif name == "note":
-        painter.drawLine(10, 3, 10, 11)
-        painter.drawLine(10, 3, 14, 4)
-        painter.setBrush(ink)
-        painter.drawEllipse(5, 9, 5, 4)
-    else:
-        painter.drawLine(4, 4, 12, 12)
-        painter.drawLine(12, 4, 4, 12)
+        path.addRoundedRect(QRectF(3, 5, 18, 14), 2.5, 2.5)
+        path.moveTo(3, 9.5)
+        path.lineTo(21, 9.5)
+        path.moveTo(6.6, 7.3)
+        path.lineTo(6.7, 7.3)
+    elif name in ("volume", "volume-off"):
+        path.addPolygon(speaker)
+        path.closeSubpath()
+        path.moveTo(15, 9.2)
+        path.quadTo(17.4, 12, 15, 14.8)
+        if name == "volume":
+            path.moveTo(17.9, 6.6)
+            path.quadTo(22, 12, 17.9, 17.4)
+        else:
+            path.moveTo(4, 4)
+            path.lineTo(20, 20)
+    else:                                              # quit: a cross
+        path.moveTo(6.5, 6.5)
+        path.lineTo(17.5, 17.5)
+        path.moveTo(17.5, 6.5)
+        path.lineTo(6.5, 17.5)
+    painter.drawPath(path)
     painter.end()
     icon = QIcon(pixmap)
     icon.addPixmap(pixmap, QIcon.Disabled)
     return icon
+
+
+class _AccentRow(QWidget):
+    """A menu row with its text in a color (Qt's own menu items take one text color for all). Where the platform
+    lets Qt draw the menu this stands in for a plain item; it hovers and clicks like one."""
+
+    def __init__(self, menu, on_click):
+        super().__init__()
+        from PySide6.QtWidgets import QHBoxLayout
+        self._menu, self._on_click, self._hover = menu, on_click, False
+        self.setMouseTracking(True)
+        self.setCursor(Qt.ArrowCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 0, 14, 0)          # the icon and text line up with the plain items above
+        row.setSpacing(8)
+        self.icon, self.label = QLabel(), QLabel()
+        self.icon.setFixedSize(16, 16)
+        row.addWidget(self.icon)
+        row.addWidget(self.label, 1)
+        self.setFixedHeight(max(24, self.fontMetrics().height() + 11))
+
+    def set_look(self, text: str, color: str, icon: QIcon) -> None:
+        self.label.setText(text)
+        self.label.setStyleSheet(f"background: transparent; color: {color};")
+        self.icon.setPixmap(icon.pixmap(16, 16))
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self._menu.close()
+            self._on_click()
+
+    def paintEvent(self, event):
+        if self._hover:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QApplication.palette().color(QPalette.Highlight))
+            painter.drawRoundedRect(self.rect().adjusted(0, 0, 0, 0), 6, 6)
 
 
 HEADER_WIDTH = 286             # the header block is this wide (px) where Qt draws the menu: 300 with its padding and border
@@ -182,7 +257,6 @@ def build_tray(window, host, player, rich: bool | None = None):
 
     play_action = menu.addAction("Play", lambda: window._toggle_play())   # no "checked" argument: it would read as Stop
     mute_action = menu.addAction("Mute", lambda: window._toggle_mute())
-    mute_action.setIcon(emoji_icon(UNMUTED_EMOJI))
     menu.addSeparator()
     fav_now_action = menu.addAction("Favorite this station", lambda: window._toggle_playing_favourite())
     fav_menu = menu.addMenu("Favorites")
@@ -205,17 +279,32 @@ def build_tray(window, host, player, rich: bool | None = None):
     rebuild_favorites()
 
     menu.addSeparator()
-    show_action = menu.addAction(f"Show {APP_NAME}", window._toggle_window)
+    show_row = None
+    if rich:                                           # the blue "Show" line: Qt items cannot color their own text
+        show_action = QWidgetAction(menu)
+        show_row = _AccentRow(menu, lambda: window._toggle_window())
+        show_action.setDefaultWidget(show_row)
+        show_action.setText(f"Show {APP_NAME}")
+        menu.addAction(show_action)
+    else:
+        show_action = menu.addAction(f"Show {APP_NAME}", window._toggle_window)
     menu.addSeparator()
     quit_action = menu.addAction("Quit", window._quit)
 
     colors: dict = {}
     state: dict = {"playing": False, "can_resume": False, "is_fav": False, "visible": True, "muted": False}
 
+    def paint_show() -> None:
+        if show_row is not None:
+            show_row.set_look(show_action.text(), colors.get("blue", "#81baff"),
+                              _menu_icon("window", colors.get("blue", "#81baff"), menu.devicePixelRatioF()))
+
     def sync_mute(muted: bool) -> None:
         state["muted"] = bool(muted)
         mute_action.setText("Unmute" if muted else "Mute")
-        mute_action.setIcon(emoji_icon(MUTED_EMOJI if muted else UNMUTED_EMOJI))
+        ratio = menu.devicePixelRatioF()
+        mute_action.setIcon(_menu_icon("volume-off", colors.get("red", "#ef7771"), ratio) if muted
+                            else _menu_icon("volume", colors.get("fg", "#dddddd"), ratio))
 
     def apply_state(new: dict | None = None) -> None:
         """Show the window's current facts in the menu: the header, Play or Stop, the favourite entry, Show or Hide."""
@@ -238,6 +327,8 @@ def build_tray(window, host, player, rich: bool | None = None):
         fav_now_action.setVisible(playing)
         fav_now_action.setText("Remove favorite" if state["is_fav"] else "Favorite this station")
         show_action.setText(f"{'Hide' if state['visible'] else 'Show'} {APP_NAME}")
+        paint_show()
+        sync_mute(state["muted"])
 
     def refresh_colors() -> None:
         # Use the active application palette, including temporary theme previews.
@@ -253,7 +344,7 @@ def build_tray(window, host, player, rich: bool | None = None):
         dark = background.lightness() < 128
         green, red, gold, blue = (("#65dc9b", "#ef7771", "#edc064", "#81baff") if dark else
                                  ("#177448", "#b6312c", "#896009", "#2166a4"))
-        colors.update(green=green, red=red)
+        colors.update(green=green, red=red, blue=blue, fg=foreground.name())
         accent_bg = palette.color(QPalette.Highlight)
         edge = QColor(background)
         edge.setRed((background.red() * 3 + foreground.red()) // 4 if dark else (background.red() * 4 + foreground.red()) // 5)
@@ -275,9 +366,11 @@ def build_tray(window, host, player, rich: bool | None = None):
             muted.setAlpha(150)
             header_block.set_colors(foreground.name(), f"rgba({muted.red()},{muted.green()},{muted.blue()},{muted.alpha()})")
         for action, name, color in (
-                (fav_now_action, "favorite", gold), (fav_menu.menuAction(), "favorite", gold),
-                (show_action, "window", blue), (quit_action, "quit", foreground.name())):
+                (fav_now_action, "favorite", gold), (fav_menu.menuAction(), "favorites", gold),
+                (quit_action, "quit", foreground.name())):
             action.setIcon(_menu_icon(name, color, ratio))
+        if show_row is None:
+            show_action.setIcon(_menu_icon("window", blue, ratio))
         apply_state()
 
     # No timers, layout overrides or background changes: recolor only on theme
