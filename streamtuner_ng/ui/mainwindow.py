@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
     # Favorites + Local are INTERNAL features, not directory plugins: always pinned
     # at the top of the sidebar, and kept out of the enable/disable toggle lists.
     INTERNAL_CHANNELS = ("bookmarks", "local")
+    _BUSY_RETRIES = 6                    # a first page refused for lack of a free request slot is asked again this often
     _CATEGORIES_REUSE_S = 120            # a background refresh reuses a category list fetched this recently
     _REFRESH_MAX_ROWS = 3000             # the 20-minute refresh leaves bigger lists to the 6-hour rule
     _CACHE_STALE_S = 6 * 3600           # disk cache older than this -> freshen in the background
@@ -84,11 +85,13 @@ class MainWindow(QMainWindow):
         self._secret_edit_pending = set()
         self._load_gen = 0           # bumps each category change; stale pages ignored
         self._channel_gen = 0
+        self._cat_cancel = threading.Event()       # stops the category fetch of a service the view has left
         self._view_search = False
         self._search_query = None
         self._cache_epoch: dict[str, int] = {}
         self._loading_key = None
         self._page_retries = set()
+        self._busy_retries = {}
         self._load_cancel = threading.Event()
         self._play_cancel = threading.Event()
         self._icon_cancel = threading.Event()
@@ -1190,7 +1193,7 @@ class MainWindow(QMainWindow):
             return
         self._reset_load()
         self._cancel_pending_icons()
-        self._channel_gen += 1
+        self._next_channel_gen()
         self._load_gen += 1
         self._loading_key = None
         self.current_channel = cur.data(Qt.UserRole)
@@ -1217,10 +1220,8 @@ class MainWindow(QMainWindow):
             self._fetch_categories(cid, generation)
         else:
             self.categories.addItem("Loading…")
-            view_generation = self._load_gen
             run_cache(lambda: self.config.cache_load(cid, "__categories__"),
-                      lambda result: self._on_cached_categories(cid, generation, result,
-                                                                view_generation))
+                      lambda result: self._on_cached_categories(cid, generation, result))
 
     def _on_cached_categories(self, cid, generation, cached, view_generation=None) -> None:
         if self._closing or cid != self.current_channel or generation != self._channel_gen:
@@ -1238,11 +1239,9 @@ class MainWindow(QMainWindow):
 
     def _fetch_categories(self, cid, generation, preferred=None, fresh=False) -> None:
         operation = "refresh_categories" if fresh else "update_categories"
-        cancel = self._load_cancel
-        view_generation = self._load_gen
+        cancel = self._cat_cancel        # a search or a category click must not cancel the list of categories itself
         run_async(lambda: self.host.call(cid, operation, timeout=45, cancel_event=cancel),
-                  lambda result: self._on_categories(cid, result, generation, preferred, fresh,
-                                                     view_generation),
+                  lambda result: self._on_categories(cid, result, generation, preferred, fresh),
                   cancelled=cancel)
 
 
@@ -1434,6 +1433,18 @@ class MainWindow(QMainWindow):
         ch = self.host.channels.get(cid)
         if not (isinstance(result, Result) and result.ok):
             retry = (gen, offset)
+            busy = isinstance(result, Result) and "still running" in (result.message or "")
+            if busy and self._busy_retries.get(retry, 0) < self._BUSY_RETRIES and self.host.is_enabled(cid):
+                # The service still holds the requests of the categories just clicked past (they finish on their
+                # own): ask again in a moment instead of making the user press Retry.
+                self._busy_retries[retry] = self._busy_retries.get(retry, 0) + 1
+                def ask_again():
+                    if not self._closing and gen == self._load_gen and not self._load_cancel.is_set():
+                        self._load_page(cid, cat, offset,
+                                        (getattr(ch, "page_size", None) if offset == 0 else getattr(ch, "page_batch_size", None))
+                                        or self.ALL_LIMIT, gen)
+                QTimer.singleShot(500, ask_again)
+                return
             if offset and retry not in self._page_retries and self.host.is_enabled(cid):
                 self._page_retries.add(retry)
                 self._list_message(f"Loaded {self.model.rowCount():,} stations; retrying next batch…")
@@ -2531,7 +2542,7 @@ class MainWindow(QMainWindow):
         self._refresh_view_key = (cid, selected)
         self._reset_load()
         self._invalidate_source(cid)
-        self._channel_gen += 1
+        self._next_channel_gen()
         self._load_gen += 1
         self._refreshing = True
         self._view_search = False
@@ -3408,11 +3419,17 @@ class MainWindow(QMainWindow):
         else:
             self._reload()
 
+    def _next_channel_gen(self) -> None:
+        self._cat_cancel.set()
+        self._cat_cancel = threading.Event()
+        self._channel_gen += 1
+
     def _reset_load(self):
         self._load_cancel.set()
         self._load_cancel = threading.Event()
         self._loading_key = None
         self._page_retries.clear()
+        self._busy_retries.clear()
         self._load_started = False
         self._load_complete = True
         self._load_errors = []
@@ -3440,7 +3457,7 @@ class MainWindow(QMainWindow):
             self._reload_all_job.cancel()
         self._load_cancel.set()
         self._load_gen += 1
-        self._channel_gen += 1
+        self._next_channel_gen()
         self._loading_key = None
         self._refreshing = False
         self._cancel_button.hide()
@@ -3481,7 +3498,7 @@ class MainWindow(QMainWindow):
         self._cache_generation += 1
         self._reset_load()
         self._load_gen += 1
-        self._channel_gen += 1
+        self._next_channel_gen()
         for cid in self.host.channels:
             self._invalidate_source(cid)
         self._cache.clear()

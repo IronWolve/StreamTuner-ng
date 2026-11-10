@@ -10,6 +10,7 @@ directly. If that endpoint ever changes, the airlock just shows the channel red.
 
 from __future__ import annotations
 
+import time
 import re
 from urllib.parse import unquote
 
@@ -142,13 +143,17 @@ class Shoutcast(Channel):
     def _sweep(self, genres) -> Page:
         """Fetch one bounded genre group and retain per-genre failures."""
         def fetch(g: str) -> tuple[list[dict], str | None]:
-            http.check_request_context()
-            try:
-                return self._map(http.post_json(BROWSE, {"genrename": g}, headers=_HEADERS, timeout=15)), None
-            except (http.RequestCancelled, http.RequestDeadlineExceeded):
-                raise
-            except Exception:  # keep successful genres and surface the missing subset
-                return [], f"Shoutcast genre request failed: {g}"
+            for attempt in (1, 2):
+                http.check_request_context()
+                try:
+                    return self._map(http.post_json(BROWSE, {"genrename": g}, headers=_HEADERS, timeout=15)), None
+                except (http.RequestCancelled, http.RequestDeadlineExceeded):
+                    raise
+                except Exception:  # one second try: a single hiccup in ~300 genre requests must not void the whole list
+                    if attempt == 2:
+                        break
+                    time.sleep(0.3)
+            return [], f"Shoutcast genre request failed: {g}"     # keep successful genres and surface the missing subset
 
         seen: set[str] = set()
         rows: list[dict] = []
