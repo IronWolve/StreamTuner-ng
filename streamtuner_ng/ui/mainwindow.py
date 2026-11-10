@@ -394,6 +394,8 @@ class MainWindow(QMainWindow):
         if obj is self.table and key in (Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers():
             self._play_selected()                            # Enter in the station list plays, like a double-click
             return True
+        if obj is self.table and key == Qt.Key_Delete and not ev.modifiers():
+            return self._delete_selected()
         if obj is self.channels or obj is self.categories:
             nxt = self.categories if obj is self.channels else self.table
             if key in (Qt.Key_Right, Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers():
@@ -1902,6 +1904,8 @@ class MainWindow(QMainWindow):
         fav = bool(bm and bm.is_favourite(row.get("url", "")))
         menu.addAction("Remove favorite" if fav else "★ Favorite",
                        lambda: self._toggle_favourite_row(row))
+        if self.current_channel == "local":
+            menu.addAction("Remove from Local", lambda: self._remove_local_row(row))
         menu.addSeparator()
         menu.addAction("Copy URL", lambda: QApplication.clipboard().setText(copy_url(row.get("url", ""))))
         song = clean_icy_title(str(row.get("playing") or ""))
@@ -2195,6 +2199,44 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Stopped")
         self._sync_visualizer()
 
+    def _drop_row_from_view(self, url: str) -> None:
+        """Remove one station from the list on screen without losing the scroll place; the next row is selected."""
+        current = self.table.currentIndex()
+        at = current.row() if current.isValid() else -1
+        self._replace_rows([r for r in self.model.rows() if r.get("url") != url], validated=True)
+        count = self.proxy.rowCount()
+        if at >= 0 and count:
+            self.table.setCurrentIndex(self.proxy.index(min(at, count - 1), 0))
+
+    def _remove_local_row(self, row) -> None:
+        """Take a station out of the Local list (the list a user fills by hand and could not empty before)."""
+        local = self.host.channels.get("local")
+        url = (row or {}).get("url", "")
+        if local is None or not url:
+            return
+        try:
+            local.remove(url)
+        except (OSError, ValueError) as exc:
+            self._status_error(self.config.redact(exc))
+            return
+        self._cache.pop(("local", self.current_category), None)
+        if self.current_channel == "local":
+            self._drop_row_from_view(url)
+        self.statusBar().showMessage("Removed from Local: " + str(row.get("title", url)))
+
+    def _delete_selected(self) -> bool:
+        """Delete in the station list: removes the selected station from Local, or from Favorites."""
+        row = self._selected_row()
+        if not row:
+            return False
+        if self.current_channel == "local":
+            self._remove_local_row(row)
+            return True
+        if self.current_channel == "bookmarks" and self.current_category == "Favorites":
+            self._toggle_favourite_row(row)
+            return True
+        return False
+
     def _toggle_favourite(self, *_a) -> None:
         self._toggle_favourite_row(self._selected_row())
 
@@ -2213,11 +2255,10 @@ class MainWindow(QMainWindow):
         self._cache.pop(("bookmarks", "Favorites"), None)   # the favourites list changed -> stale cache
         if self.current_channel == "bookmarks" and self.current_category == "Favorites" and not now:
             url = row.get("url", "")                          # viewing the list we just edited ->
-            self.model.set_rows([r for r in self.model.rows() if r.get("url") != url])  # drop the row now
-            self._apply_column_visibility()
+            self._drop_row_from_view(url)                     # drop the row now, keep the place in the list
             self.statusBar().showMessage("Removed from Favorites: " + row["title"])
         else:
-            self.model.refresh_icons()                       # elsewhere: just flip the ★ marker in place
+            self.model.refresh_icons({row.get("url", "")})   # elsewhere: just flip the ★ marker of that row in place
             self.statusBar().showMessage(("Favorited " if now else "Unfavorited ") + row["title"])
         if now and not row.get("favicon"):   # icon-less station -> derive its real favicon (background)
             from ..favicons import derive_station_favicon_url
@@ -3591,7 +3632,7 @@ class MainWindow(QMainWindow):
             self.hide()
             return
         if not self._close_waiting:
-            self._song_history.save()                     # again on quit, so nothing heard is lost
+            self._song_history.flush_if_dirty()           # a song that failed to save is tried again; the rest is already queued
             self._save_layout()
             if hasattr(self.config, "retry_failed_writes"):
                 self.config.retry_failed_writes()
