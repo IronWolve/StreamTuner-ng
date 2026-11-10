@@ -112,52 +112,6 @@ def _menu_icon(name: str, color: str, ratio: float, size: int = 16) -> QIcon:
     return icon
 
 
-class _AccentRow(QWidget):
-    """A menu row with its text in a color (Qt's own menu items take one text color for all). Where the platform
-    lets Qt draw the menu this stands in for a plain item; it hovers and clicks like one."""
-
-    def __init__(self, menu, on_click):
-        super().__init__()
-        from PySide6.QtWidgets import QHBoxLayout
-        self._menu, self._on_click, self._hover = menu, on_click, False
-        self.setMouseTracking(True)
-        self.setCursor(Qt.ArrowCursor)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(4, 0, 14, 0)          # the icon and text line up with the plain items above
-        row.setSpacing(8)
-        self.icon, self.label = QLabel(), QLabel()
-        self.icon.setFixedSize(16, 16)
-        row.addWidget(self.icon)
-        row.addWidget(self.label, 1)
-        self.setFixedHeight(max(24, self.fontMetrics().height() + 11))
-
-    def set_look(self, text: str, color: str, icon: QIcon) -> None:
-        self.label.setText(text)
-        self.label.setStyleSheet(f"background: transparent; color: {color};")
-        self.icon.setPixmap(icon.pixmap(16, 16))
-
-    def enterEvent(self, event):
-        self._hover = True
-        self.update()
-
-    def leaveEvent(self, event):
-        self._hover = False
-        self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
-            self._menu.close()
-            self._on_click()
-
-    def paintEvent(self, event):
-        if self._hover:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QApplication.palette().color(QPalette.Highlight))
-            painter.drawRoundedRect(self.rect().adjusted(0, 0, 0, 0), 6, 6)
-
-
 HEADER_WIDTH = 286             # the header block is this wide (px) where Qt draws the menu: 300 with its padding and border
 WRAP_CHARS = 42                # and the title wraps at about this many characters where it is plain text
 TITLE_LINES = 3
@@ -279,25 +233,14 @@ def build_tray(window, host, player, rich: bool | None = None):
     rebuild_favorites()
 
     menu.addSeparator()
-    show_row = None
-    if rich:                                           # the blue "Show" line: Qt items cannot color their own text
-        show_action = QWidgetAction(menu)
-        show_row = _AccentRow(menu, lambda: window._toggle_window())
-        show_action.setDefaultWidget(show_row)
-        show_action.setText(f"Show {APP_NAME}")
-        menu.addAction(show_action)
-    else:
-        show_action = menu.addAction(f"Show {APP_NAME}", window._toggle_window)
+    show_action = menu.addAction(f"Show {APP_NAME}", window._toggle_window)
+    if rich:
+        menu.setDefaultAction(show_action)             # the style sheet colors the default item: the blue line, same layout as the rest
     menu.addSeparator()
     quit_action = menu.addAction("Quit", window._quit)
 
     colors: dict = {}
     state: dict = {"playing": False, "can_resume": False, "is_fav": False, "visible": True, "muted": False}
-
-    def paint_show() -> None:
-        if show_row is not None:
-            show_row.set_look(show_action.text(), colors.get("blue", "#81baff"),
-                              _menu_icon("window", colors.get("blue", "#81baff"), menu.devicePixelRatioF()))
 
     def sync_mute(muted: bool) -> None:
         state["muted"] = bool(muted)
@@ -327,7 +270,6 @@ def build_tray(window, host, player, rich: bool | None = None):
         fav_now_action.setVisible(playing)
         fav_now_action.setText("Remove favorite" if state["is_fav"] else "Favorite this station")
         show_action.setText(f"{'Hide' if state['visible'] else 'Show'} {APP_NAME}")
-        paint_show()
         sync_mute(state["muted"])
 
     def refresh_colors() -> None:
@@ -357,6 +299,8 @@ def build_tray(window, host, player, rich: bool | None = None):
             f"padding: 8px 6px; font-size: 13px; }}"
             f"QMenu::item {{ padding: 5px 14px 5px 8px; border-radius: 6px; margin: 0; background: transparent; }}"
             f"QMenu::item:selected {{ background: {accent_bg.name()}; color: {palette.color(QPalette.HighlightedText).name()}; }}"
+            f"QMenu::item:default {{ color: {blue}; font-weight: normal; }}"
+            f"QMenu::item:default:selected {{ color: {palette.color(QPalette.HighlightedText).name()}; }}"
             f"QMenu::item:disabled {{ color: rgba({quiet.red()},{quiet.green()},{quiet.blue()},{quiet.alpha()}); }}"
             f"QMenu::separator {{ height: 1px; background: {edge.name()}; margin: 6px 8px; }}"
             f"QMenu::icon {{ padding-left: 4px; }}"
@@ -369,8 +313,7 @@ def build_tray(window, host, player, rich: bool | None = None):
                 (fav_now_action, "favorite", gold), (fav_menu.menuAction(), "favorites", gold),
                 (quit_action, "quit", foreground.name())):
             action.setIcon(_menu_icon(name, color, ratio))
-        if show_row is None:
-            show_action.setIcon(_menu_icon("window", blue, ratio))
+        show_action.setIcon(_menu_icon("window", blue, ratio))
         apply_state()
 
     # No timers, layout overrides or background changes: recolor only on theme
