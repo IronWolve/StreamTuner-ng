@@ -63,7 +63,7 @@ class ExampleRadio(Channel):
     #
     # SEARCH: when `search` is set the app may pass an EMPTY or unknown `category` (searching all
     # services does that). Search every category then, as below - looking only in `category` finds nothing.
-    # A list is expected: return [] when there is nothing (None, a dict or a number is reported as an error).
+    # A list is expected: return [] when there is nothing (a dict or a number is reported as an error).
     def update_streams(self, category, search=None):
         rows = []
         categories = list(self.STATIONS) if (search and category not in self.STATIONS) else [category]

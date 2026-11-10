@@ -223,9 +223,9 @@ Every plugin call runs behind an airlock: if your plugin throws, hangs, or retur
 it gets a red/amber status dot (and is switched off for the rest of that run after 3 failed list
 or timeout calls in a row — a station that will not start does not count; Reload on that service
 switches it back on, and it is on again at the next start) — the rest of the app keeps working.
-A method that returns the wrong kind of thing (`None`, a dict, a number instead of a list) is
-reported by name in the log ("update_streams returned NoneType, expected a list…"); a tuple or a
-dict's keys are accepted and logged. A plugin file that won't even import is skipped and reported, not
+A method that returns the wrong kind of thing (a dict or a number instead of a list) is
+reported by name ("update_streams returned dict, expected a list…"); `None` counts as "nothing" and a tuple
+or a dict's keys are accepted, both with a log note asking for a list. A plugin file that won't even import is skipped and reported, not
 fatal. So experiment freely.
 
 Helpers you can import: `from streamtuner_ng.net import http`: `http.get_json(url, params, timeout=…)`,

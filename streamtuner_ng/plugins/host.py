@@ -391,8 +391,8 @@ class PluginHost:
             data, problem = self._as_list(method, data)
             if problem:
                 return self._record(cid, Result(Status.ERROR, message=problem))
-            self._log(self.health[cid], f"{method} returned a {type(box.get('data')).__name__}; "
-                                        "return a list (it was converted)")
+            self._log(self.health[cid], f"{method} returned {type(box.get('data')).__name__}; "
+                                        "return a list (an empty list for nothing)")
         if method in ("update_categories", "refresh_categories"):
             if isinstance(data, list):
                 kept = [x[:256] for x in data[:MAX_ROWS] if isinstance(x, str)]
@@ -494,6 +494,8 @@ class PluginHost:
         log says so); anything else (None, a dict, a number) is an error that names the method, not 'no results'."""
         import types
         from collections.abc import KeysView, ValuesView
+        if value is None:
+            return [], ""                  # 'nothing' written as None keeps working (the log asks for [])
         if isinstance(value, (tuple, set, frozenset, KeysView, ValuesView, types.GeneratorType)):
             try:
                 return list(value), ""

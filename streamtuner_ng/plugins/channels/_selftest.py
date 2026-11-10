@@ -46,7 +46,7 @@ class BrokenGarbage(Channel):
         return ["x"]
 
     def update_streams(self, category, search=None):
-        return None              # falsey/garbage -> EMPTY, not a crash
+        return None              # garbage that means "nothing" -> EMPTY (logged), not a crash
 
 
 BROKEN_PLUGINS = [BrokenThrow, BrokenHang, BrokenGarbage]
