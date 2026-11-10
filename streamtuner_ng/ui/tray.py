@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget, QWidgetAction
 
 # selectable tray icons: key -> (emoji, label). The note is the default.
@@ -83,7 +83,7 @@ def _menu_icon(name: str, color: str, ratio: float) -> QIcon:
     return icon
 
 
-HEADER_WIDTH = 300             # the header block is this wide (px) where the menu is drawn by Qt
+HEADER_WIDTH = 286             # the header block is this wide (px) where Qt draws the menu: 300 with its padding and border
 WRAP_CHARS = 42                # and the title wraps at about this many characters where it is plain text
 TITLE_LINES = 3
 
@@ -116,17 +116,22 @@ class _HeaderBlock(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFixedWidth(HEADER_WIDTH)
         box = QVBoxLayout(self)
-        box.setContentsMargins(14, 6, 14, 6)
-        box.setSpacing(3)
+        box.setContentsMargins(10, 2, 10, 8)             # the same left edge as the item text
+        box.setSpacing(0)
         self.title, self.subtitle, self.info = QLabel(), QLabel(), QLabel()
-        for label in (self.title, self.subtitle, self.info):
+        for label, top in ((self.title, 0), (self.subtitle, 5), (self.info, 3)):
             label.setWordWrap(True)
             label.setTextFormat(Qt.PlainText)
-            label.setStyleSheet("background: transparent;")
+            label.setContentsMargins(0, top, 0, 0)
             box.addWidget(label)
         font = self.title.font()
-        font.setBold(True)
+        font.setPixelSize(14)
+        font.setWeight(QFont.DemiBold)
         self.title.setFont(font)
+        for label in (self.subtitle, self.info):
+            small = label.font()
+            small.setPixelSize(13)
+            label.setFont(small)
 
     def set_text(self, title: str, subtitle: str, info: str) -> None:
         self.title.setText(title)
@@ -155,6 +160,10 @@ def build_tray(window, host, player, rich: bool | None = None):
     tray = QSystemTrayIcon(tray_icon(window.config), window)
     tray.setToolTip("StreamTuner-ng")
     menu = QMenu()
+    if rich:                                           # a rounded card: the window behind the corners is see-through
+        menu.setWindowFlag(Qt.FramelessWindowHint, True)
+        menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+        menu.setAttribute(Qt.WA_TranslucentBackground, True)
 
     header_lines: list = []
     header_block = None
@@ -245,6 +254,22 @@ def build_tray(window, host, player, rich: bool | None = None):
         green, red, gold, blue = (("#65dc9b", "#ef7771", "#edc064", "#81baff") if dark else
                                  ("#177448", "#b6312c", "#896009", "#2166a4"))
         colors.update(green=green, red=red)
+        accent_bg = palette.color(QPalette.Highlight)
+        edge = QColor(background)
+        edge.setRed((background.red() * 3 + foreground.red()) // 4 if dark else (background.red() * 4 + foreground.red()) // 5)
+        edge.setGreen((background.green() * 3 + foreground.green()) // 4 if dark else (background.green() * 4 + foreground.green()) // 5)
+        edge.setBlue((background.blue() * 3 + foreground.blue()) // 4 if dark else (background.blue() * 4 + foreground.blue()) // 5)
+        quiet = QColor(foreground)
+        quiet.setAlpha(150)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {background.name()}; border: 1px solid {edge.name()}; border-radius: 10px; "
+            f"padding: 8px 6px; font-size: 13px; }}"
+            f"QMenu::item {{ padding: 5px 14px 5px 8px; border-radius: 6px; margin: 0; background: transparent; }}"
+            f"QMenu::item:selected {{ background: {accent_bg.name()}; color: {palette.color(QPalette.HighlightedText).name()}; }}"
+            f"QMenu::item:disabled {{ color: rgba({quiet.red()},{quiet.green()},{quiet.blue()},{quiet.alpha()}); }}"
+            f"QMenu::separator {{ height: 1px; background: {edge.name()}; margin: 6px 8px; }}"
+            f"QMenu::icon {{ padding-left: 4px; }}"
+            f"QMenu::right-arrow {{ margin-right: 6px; }}")
         if header_block is not None:
             muted = QColor(foreground)
             muted.setAlpha(150)
