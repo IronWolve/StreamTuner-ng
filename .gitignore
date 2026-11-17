@@ -4,6 +4,7 @@
 *
 
 !/branding/
+!/debian/
 !/packaging/
 !/packaging/licenses/
 !/packaging/licenses/PySide/
@@ -30,6 +31,9 @@
 !/NOTICE
 !/PLUGINS.md
 !/README.md
+!/CHANGELOG.md
+!/debian/copyright
+!/debian/changelog
 !/THEME-HOWTO.md
 !/branding/streamtuner-ng-logo.png
 !/packaging/licenses/PySide/Apache-2.0.txt

@@ -1,0 +1,12 @@
+streamtuner-ng (1.6.0-1) UNRELEASED; urgency=medium
+
+  * Prepare initial Debian packaging metadata for upstream version 1.6.0.
+  * Include upstream release history in CHANGELOG.md.
+  * New upstream version:
+    - Redesign the tray menu with grouped controls, a now-playing header,
+      state-aware Show / Hide, and a Favorite this station action.
+    - Display public AudioAddict stream addresses in station views.
+    - Rename bundled themes to Deep Plum, Polar Slate, Midnight Violet
+      and Warm Charcoal, preserving existing saved selections.
+
+ -- IronWolve <3938589+IronWolve@users.noreply.github.com>  Mon, 16 Nov 2026 18:51:29 -0800

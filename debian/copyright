@@ -1,0 +1,39 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: StreamTuner-NG
+Upstream-Contact: IronWolve <https://github.com/IronWolve/StreamTuner-ng/issues>
+Source: https://github.com/IronWolve/StreamTuner-ng
+Comment: Upstream licensing information supplied for Debian maintainer review.
+ This draft covers the original application code and artwork identified below.
+ It does not assign the application's license to third-party runtime libraries
+ or replace their copyright and license notices if those libraries are bundled.
+
+Files: .gitattributes
+ .gitignore
+ .python-version
+ LICENSE
+ NOTICE
+ CHANGELOG.md
+ PLUGINS.md
+ README.md
+ THEME-HOWTO.md
+ requirements.txt
+ run.py
+ plugins/*
+ debian/*
+ streamtuner_ng/*
+Copyright: 2026 IronWolve
+License: Apache-2.0
+Comment: The application is an independently written reimagining of StreamTuner2.
+ Upstream NOTICE states that original StreamTuner2 program code is not included.
+ The LICENSE document is retained verbatim as the application's license text.
+
+Files: branding/streamtuner-ng-logo.png
+ streamtuner_ng/assets/*
+Copyright: 2026 IronWolve (human-authored contributions)
+License: Apache-2.0
+Comment: The license grant applies to any rights held by upstream in these assets.
+ No exclusive copyright is asserted over material that is not copyrightable.
+
+License: Apache-2.0
+ On Debian systems, the complete text of the Apache License, Version 2.0,
+ can be found in /usr/share/common-licenses/Apache-2.0.

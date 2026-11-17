@@ -27,6 +27,8 @@ A cross-platform internet-radio browser inspired by StreamTuner2, built with PyS
 
 Browse by genre, search supported directories, and save your favorite stations. Customize the look with themes, color palettes, and wallpapers, or add your own Python providers.
 
+See the [changelog](CHANGELOG.md) for version history.
+
 ## Platforms
 
 Ready-to-run packages are available on the [Releases page](https://github.com/IronWolve/StreamTuner-ng/releases).
