@@ -121,13 +121,13 @@ THEMES: dict[str, dict] = {
                       "wallpaper": "synthwave"},
 }
 
-# display label for the View → Theme menu (dict insertion order = menu order)
+# Display labels; stable IDs preserve saved selections (insertion order = menu order).
 THEME_LABELS: dict[str, str] = {
-    "dark": "Dark", "light": "Light", "dracula": "Dracula", "nord": "Nord",
+    "dark": "Dark", "light": "Light", "dracula": "Midnight Violet", "nord": "Polar Slate",
     "solarized-dark": "Solarized Dark", "solarized-light": "Solarized Light",
     "gruvbox-dark": "Gruvbox Dark", "gruvbox-light": "Gruvbox Light",
-    "xterm": "xterm", "ubuntu": "Ubuntu", "tokyo-night": "Tokyo Night",
-    "monokai-pro": "Monokai Pro", "dark-pastels": "Dark Pastels", "cyberpunk-neon": "Cyberpunk Neon",
+    "xterm": "xterm", "ubuntu": "Deep Plum", "tokyo-night": "Tokyo Night",
+    "monokai-pro": "Warm Charcoal", "dark-pastels": "Dark Pastels", "cyberpunk-neon": "Cyberpunk Neon",
     "amber": "Amber", "green-phosphor": "Green Phosphor", "white-phosphor": "White Phosphor",
     "cga": "CGA", "crt": "CRT Green", "synthwave": "Synthwave",
 }

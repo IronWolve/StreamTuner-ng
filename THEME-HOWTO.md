@@ -13,7 +13,7 @@ built-in one, and share it with anyone — they just drop your file in and pick 
 ## The fastest way (export → edit → import)
 
 1. Open **Options → Themes**.
-2. Pick a theme close to what you want (e.g. *Dracula*) and click **Export selected…**.
+2. Pick a theme close to what you want (e.g. *Midnight Violet*) and click **Export selected…**.
    You now have a `.json` file with every color filled in.
 3. Open that file in any text editor and change the colors (see below).
 4. Back in **Options → Themes**, click **Import theme…** and choose your file.
